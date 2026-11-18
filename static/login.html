@@ -1,0 +1,19 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only --><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sign in · GAMe</title><link rel="stylesheet" href="/static/style.css?v=0.3.5"></head>
+<body class="auth-page"><main class="auth-card"><div class="auth-brand"><span class="brand-icon">G<span>✦</span></span><div>GAMe<small>GOVERNANCE AND AGENT MANAGEMENT for Enterprise</small></div></div>
+<p class="eyebrow auth-company-name" id="companyAccessLabel">Company Access</p><h1>Sign in</h1><p class="muted">Use your GAMe account to access authorized agents and providers.</p>
+<form id="loginForm" class="auth-form"><label>Username<input id="username" name="username" autocomplete="username" required autofocus></label>
+<label>Password<input id="password" name="password" type="password" autocomplete="current-password" required></label>
+<button type="submit" class="primary-btn" id="submitLogin">Sign in</button><div class="error" role="alert" id="authError"></div></form>
+<p class="auth-note">Supported by Happili Platform. <a href="https://github.com/Happili-platform/game" target="_blank" rel="noopener noreferrer">Source code (AGPLv3)</a></p>
+</main><script>
+fetch('/api/branding',{cache:'no-store'}).then(r=>r.ok?r.json():null).then(data=>{
+ if(data?.company_name)document.querySelector('#companyAccessLabel').textContent=`${data.company_name} Access`;
+}).catch(()=>{});
+document.querySelector('#loginForm').addEventListener('submit',async e=>{
+ e.preventDefault();const f=e.currentTarget, btn=document.querySelector('#submitLogin'),err=document.querySelector('#authError');btn.disabled=true;err.textContent='';
+ try{const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:f.elements.username.value,password:f.elements.password.value})});
+ const data=await r.json();if(!r.ok)throw new Error(data.detail||'Unable to sign in'); f.elements.password.value='';location.replace(data.must_change_password?'/password':'/');}
+ catch(x){err.textContent=x.message;btn.disabled=false;}
+});</script></body></html>

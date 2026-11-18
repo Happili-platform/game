@@ -1,0 +1,22 @@
+# GAME — legal, licensing, security and governance ownership
+# Publisher: Happili Platform
+# GitHub CODEOWNERS is enforced only when branch rules require code-owner review.
+# Owner must have suitable repository permissions.
+
+# Protect this policy from being changed without owner review.
+/.github/CODEOWNERS @siddpill
+
+# Legal and open-source licensing
+/LICENSE @siddpill
+/COPYRIGHT @siddpill
+/CONTRIBUTING.md @siddpill
+/SECURITY.md @siddpill
+
+# Related governance documentation
+/docs/OPEN_SOURCE_POLICY.md @siddpill
+/docs/PUBLISHING_CHECKLIST.md @siddpill
+/docs/SOURCE_CODE_LINK.md @siddpill
+/docs/SPDX_GUIDANCE.md @siddpill
+
+# GitHub security policies and workflows
+/.github/ @siddpill

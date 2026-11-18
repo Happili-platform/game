@@ -1,0 +1,14 @@
+services:
+  game:
+    build: .
+    ports:
+      - "127.0.0.1:8000:8000" # Localhost-only alpha evaluation; not internet-facing
+    environment:
+      GAME_DB_PATH: /app/data/game.db
+      GAME_DEMO_DATA: "false"
+      GAME_AUTH_MODE: "password"
+      GAME_VAULT_KEY_PATH: /app/vault/master.key
+    volumes:
+      - ./data:/app/data
+      - ${HOME}/.config/game:/app/vault:ro
+    restart: unless-stopped

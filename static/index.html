@@ -1,0 +1,288 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="theme-color" content="#087C9F" />
+  <title>GAMe — GOVERNANCE AND AGENT MANAGEMENT for Enterprise</title>
+  <link rel="stylesheet" href="/static/style.css?v=0.3.5-provider-filter-zoom1" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-icon">G<span>✦</span></span><div>GAMe<small>GOVERNANCE AND AGENT MANAGEMENT for Enterprise</small></div></div>
+      <div class="section-label">WORKSPACE</div>
+      <nav class="nav" aria-label="Main navigation">
+        <button data-view="overview" class="nav-item active"><span class="nav-icon">◫</span> Overview</button>
+        <button data-view="agents" class="nav-item"><span class="nav-icon">⬡</span> Agent registry</button>
+        <button data-view="runtime" class="nav-item"><span class="nav-icon">◷</span> Runtime observability</button>
+        <button data-view="finops" class="nav-item"><span class="nav-icon">＄</span> Agentic FinOps</button>
+        <button data-view="trustGraph" class="nav-item"><span class="nav-icon">◎</span> Trust Graph</button>
+        <button data-view="policies" class="nav-item"><span class="nav-icon">◇</span> Policy checks</button>
+        <button data-view="connections" class="nav-item"><span class="nav-icon">↔</span> Provider connections</button>
+      </nav>
+      <div class="section-label" id="adminSection" hidden>ADMINISTRATION</div>
+      <nav class="nav" aria-label="Administration">
+        <button data-view="users" id="usersNav" class="nav-item" hidden><span class="nav-icon">♙</span> Users &amp; roles</button>
+        <button data-view="audit" id="auditNav" class="nav-item" hidden><span class="nav-icon">☷</span> Audit log</button>
+      </nav>
+      <div class="sidebar-foot"><span class="demo-dot"></span> GAME workspace <small id="sidebarCompanyAccess">v0.3.5 · Company Access</small></div>
+    </aside>
+
+    <div class="main-shell">
+      <header class="topbar">
+        <div class="crumb">Workspace <span>/</span> <strong id="crumb">Overview</strong></div>
+        <div class="top-actions"><span class="demo-badge" id="tenantIdentity">SIGNING IN</span><a href="/password" id="myPasswordLink" class="account-link" hidden>My password</a><button type="button" id="logoutBtn" class="secondary-btn" hidden>Sign out</button></div>
+      </header>
+      <main class="main">
+        <div class="page-intro"><div><p class="eyebrow">CONTROL PLANE / OPERATIONS</p><h1 id="pageTitle">Enterprise agent overview</h1><p id="pageSubtitle" class="subtitle">A unified view of the agents you have registered, their ownership, risk and recorded usage.</p></div><div class="date-chip" id="monthLabel">CURRENT MONTH</div></div>
+        <div class="notice"><span>ⓘ</span><div><strong>Prototype: advisory checks only.</strong> Agents are discovered only when you explicitly sync an authorized provider connection. No agents are blocked, paused or modified. No sample agents are created by default; recorded costs are not validated against invoices.</div></div>
+
+        <section id="overviewView">
+          <div class="metrics" id="metrics"><div class="loading">Loading metrics…</div></div>
+          <div class="main-grid">
+            <section class="panel spend-panel"><div class="panel-head"><div><h2>Recorded spend by platform</h2><p>Month to date · manually supplied events</p></div><span class="tag">USD</span></div><div id="spendBars" class="spend-bars"></div></section>
+            <section class="panel attention-panel"><div class="panel-head"><div><h2>Requires attention</h2><p>Rules matched on registered agent data</p></div><button data-view="agents" class="plain-link">View all →</button></div><div id="attentionList"></div></section>
+          </div>
+          <section class="panel table-panel"><div class="panel-head"><div><h2>Recently reviewed agents</h2><p>Current registry and governance signals</p></div><button data-view="agents" class="plain-link">Open registry →</button></div><div class="table-wrap"><table><thead><tr><th>AGENT</th><th>PLATFORM</th><th>OWNER</th><th>RISK</th><th>SPEND THIS MONTH</th><th></th></tr></thead><tbody id="overviewTable"></tbody></table></div></section>
+        </section>
+
+        <section id="agentsView" hidden>
+          <section class="panel table-panel"><div class="panel-head filters"><div><h2>Agent registry</h2><p>Agents are registered automatically by authorized provider discovery. Review ownership, approvals and policy findings.</p></div><div class="filter-controls registry-filters">
+              <input id="searchAgents" placeholder="Search agent or owner…" aria-label="Search agents"/>
+              <select id="riskFilter" aria-label="Filter risk"><option value="">All risk levels</option><option value="high">High risk</option><option value="medium">Medium risk</option><option value="low">Low risk</option><option value="clear">Clear</option></select>
+              <details class="registry-more-actions" id="registryMoreActions" hidden>
+                <summary aria-label="Additional registry actions">More actions <span aria-hidden="true">▾</span></summary>
+                <div class="registry-actions-menu">
+                  <button type="button" id="newAgentBtn" class="registry-menu-item" hidden>Register unmanaged agent</button>
+                  <p class="registry-actions-help">For agents without a supported discovery integration. Automatically discovered agents need no manual registration.</p>
+                </div>
+              </details>
+            </div></div><div class="table-wrap"><table><thead><tr><th>AGENT</th><th>PLATFORM</th><th>OWNER</th><th>APPROVAL</th><th>RISK</th><th>SPEND</th><th></th></tr></thead><tbody id="agentTable"></tbody></table></div></section>
+        </section>
+
+        <section id="trustGraphView" hidden>
+          <section class="panel trust-panel">
+            <div class="panel-head"><div><h2>Agent-to-Tool Trust Graph</h2><p>Read-only evidence-backed visibility · Declared capabilities are not proof of access or execution.</p></div><button type="button" class="secondary-btn" id="trustRefresh">Refresh graph</button></div>
+            <p class="provider-helper" id="trustStatus" role="status" aria-live="polite">Loading Trust Graph…</p>
+            <div class="runtime-stats" id="trustStats"></div>
+            <div class="trust-tabs" role="tablist" aria-label="Trust Graph views">
+              <button type="button" class="trust-tab active" role="tab" aria-selected="true" data-trust-tab="graph">Graph</button>
+              <button type="button" class="trust-tab" role="tab" aria-selected="false" data-trust-tab="inventory">Inventory</button>
+              <button type="button" class="trust-tab" role="tab" aria-selected="false" data-trust-tab="evidence">Evidence</button>
+            </div>
+            <div class="trust-filters"><label>Search <input type="search" id="trustSearch" placeholder="Agent, tool, provider or evidence…" aria-label="Search Trust Graph" /></label><label>Evidence <select id="trustEvidenceFilter"><option value="">All evidence</option><option value="declared_configuration">Configured relationship</option><option value="observed_invocation">Reported invocation</option></select></label></div>
+            <div id="trustGraphTab" class="trust-tab-panel" role="tabpanel">
+              <div class="trust-legend"><span><i class="trust-key trust-agent-key"></i> Agent</span><span><i class="trust-key trust-tool-key"></i> Tool</span><span><i class="trust-key trust-declared-key"></i> Configured</span><span><i class="trust-key trust-observed-key"></i> Reported invocation</span></div>
+              <div class="trust-zoom-toolbar" role="group" aria-label="Trust Graph zoom controls"><button type="button" class="secondary-btn" id="trustZoomOut" aria-label="Zoom out of Trust Graph">−</button><output id="trustZoomLevel" aria-live="polite">Fit</output><button type="button" class="secondary-btn" id="trustZoomIn" aria-label="Zoom into Trust Graph">+</button><button type="button" class="secondary-btn" id="trustZoomFit">Fit to view</button></div>
+              <div id="trustGraphCanvas" class="trust-graph-canvas" role="region" aria-label="Agent and tool relationship graph"></div>
+              <p class="provider-helper" id="trustGraphLimit"></p>
+              <div id="trustSelectedDetail" class="trust-selected-detail" role="status">Select a graph node to inspect its relationships.</div>
+            </div>
+            <div id="trustInventoryTab" class="trust-tab-panel" role="tabpanel" hidden>
+              <div class="table-wrap"><table><thead><tr><th>TOOL</th><th>PROVIDER / NAMESPACE</th><th>CAPABILITY</th><th>LINKS</th><th>LAST SEEN</th></tr></thead><tbody id="trustInventoryRows"></tbody></table></div>
+            </div>
+            <div id="trustEvidenceTab" class="trust-tab-panel" role="tabpanel" hidden>
+              <p class="provider-helper">Evidence references are identifiers supplied by collectors. They are not independently verified execution records.</p>
+              <div class="table-wrap"><table><thead><tr><th>AGENT</th><th>TOOL</th><th>TYPE</th><th>REFERENCE</th><th>LAST SEEN</th></tr></thead><tbody id="trustEvidenceRows"></tbody></table></div>
+            </div>
+          </section>
+          <section class="panel" style="padding:24px;margin-top:16px">
+            <div class="panel-head"><div><h3>Provider resources</h3><p>Repository/app installations and advertised MCP tools. These do not represent AI agents or tool usage.</p></div></div>
+            <div class="provider-inventory-filters"><label for="providerInventoryFilter">Provider <select id="providerInventoryFilter"><option value="">All providers</option></select></label><label for="providerInventorySearch">Find resource <input type="search" id="providerInventorySearch" placeholder="Search resources…" /></label><span id="providerInventoryCount" class="provider-helper" role="status" aria-live="polite"></span></div>
+            <div class="table-wrap"><table><thead><tr><th>TYPE</th><th>NAME</th><th>PROVIDER CONNECTION</th><th>LAST SEEN</th></tr></thead><tbody id="providerInventoryRows"><tr><td colspan="4">No provider inventory synchronized yet.</td></tr></tbody></table></div>
+          </section>
+        </section>
+        <section id="finopsView" hidden>
+          <section class="panel" style="padding:24px">
+            <div class="panel-head"><div><h2>Agentic FinOps</h2><p>Observed model usage · Documented rate estimates · Azure scope-level ActualCost available separately from agent estimates</p></div><button class="secondary-btn" id="finopsRefresh" type="button">Refresh</button></div>
+            <div class="filter-controls" style="margin:14px 0"><label>Period <select id="finopsPeriod"><option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option><option value="30d" selected>Last 30 days</option><option value="all">All history</option></select></label></div>
+            <div class="runtime-stats" id="finopsStats"></div>
+            <p class="provider-helper" id="finopsNotice">Only actual observed token counts are shown. Missing price and billing telemetry are Not tracked, not zero.</p>
+            <p class="error" id="finopsError" role="alert"></p>
+            <section class="finops-azure-section" aria-labelledby="finopsAzureTitle">
+              <div class="panel-head finops-azure-heading"><div><h3 id="finopsAzureTitle">Azure resource costs</h3><p>ActualCost reported by Azure Cost Management · scope-level, not per-agent or invoice-verified</p></div></div>
+              <p class="provider-helper" id="finopsAzureCostStatus" role="status">No Azure Cost Management data imported yet.</p>
+              <div class="finops-cost-kpis" id="finopsAzureKpis" aria-label="Azure cost totals"></div>
+              <div class="finops-cost-layout">
+                <section class="finops-service-panel" aria-labelledby="finopsServiceTitle"><h4 id="finopsServiceTitle">Cost by Azure service</h4><div id="finopsServiceBars" class="finops-service-bars"></div></section>
+                <section class="finops-resource-panel" aria-labelledby="finopsResourceTitle"><div class="finops-resource-heading"><h4 id="finopsResourceTitle">Resources by cost</h4><input id="finopsResourceSearch" type="search" placeholder="Find a resource or service…" aria-label="Search Azure resource charges"/></div>
+                <div class="table-wrap finops-cost-table-wrap"><table class="finops-cost-table"><thead><tr><th>RESOURCE / SERVICE</th><th>CHARGE</th><th>DETAILS</th></tr></thead><tbody id="finopsAzureCosts"><tr><td colspan="3">Not tracked</td></tr></tbody></table></div>
+                <p id="finopsResourceCount" class="provider-helper"></p></section>
+              </div>
+              <p class="provider-helper finops-classification-note">Azure resource ActualCost includes infrastructure and shared services. These charges are not assigned to individual agents, and may change as Azure updates billing records.</p>
+            </section>
+            <div class="panel-head" style="margin-top:26px"><div><h3>Agent model usage and approved budgets</h3><p>Observed tokens and separately estimated model charges</p></div></div>
+            <div class="table-wrap"><table><thead><tr><th>AGENT</th><th>MODEL OPERATIONS</th><th>INPUT TOKENS (OBSERVED)</th><th>OUTPUT TOKENS (OBSERVED)</th><th>ESTIMATED COST (PARTIAL)</th><th>BUSINESS-APPROVED MONTHLY BUDGET</th></tr></thead><tbody id="finopsTable"><tr><td colspan="6">No model usage telemetry imported.</td></tr></tbody></table></div>
+          </section>
+        </section>
+        <section id="runtimeView" hidden>
+          <section class="panel" style="padding:24px">
+            <div class="panel-head"><div><h2>Agent runtime observability</h2><p>Observed run metadata only · No simulated executions or inferred model costs</p></div><button id="runtimeRefresh" type="button" class="secondary-btn">Refresh</button></div>
+            <p class="provider-helper">Runs are shown only when a trusted telemetry collector submits evidence. Agent discovery does not imply that runtime monitoring is enabled.</p>
+            <div id="runtimeStats" class="runtime-stats"></div>
+            <div class="filter-controls" style="margin:16px 0"><label>Agent <select id="runtimeAgentFilter"><option value="">All visible agents</option></select></label><label>Period <select id="runtimePeriod"><option value="24h">Last 24 hours</option><option value="7d">Last 7 days</option><option value="30d">Last 30 days</option><option value="all">All history</option></select></label></div>
+            <p id="runtimeCollectionHealth" class="provider-helper" role="status">Collection health: Not tracked</p><div class="runtime-popularity-toolbar"><label>Show <select id="runtimeTopN"><option value="5">Top 5</option><option value="10">Top 10</option><option value="20">Top 20</option></select></label><label>Find agent <input type="search" id="runtimePopularitySearch" placeholder="Search ranking…" aria-label="Search agent popularity"/></label></div>
+            <div class="runtime-popularity-grid"><div id="runtimeTrend" class="runtime-trend" aria-label="Daily executions by agent"></div><div id="runtimePopularity" class="runtime-ranking" aria-label="Top agents by executions"></div></div><p id="runtimeError" class="error" role="alert"></p>
+            <div class="table-wrap"><table><thead><tr><th>START (UTC)</th><th>AGENT</th><th>SOURCE</th><th>OUTCOME</th><th>DURATION</th><th>TRACE</th><th></th></tr></thead><tbody id="runtimeTable"><tr><td colspan="7">No executions recorded.</td></tr></tbody></table></div>
+          </section>
+          <section class="panel" style="padding:24px;margin-top:18px"><div class="panel-head"><div><h2>Trace and span details</h2><p>Choose an execution above to inspect metadata, tool/model spans and correlation identifiers.</p></div></div><div id="runtimeTrace" class="provider-helper">No run selected.</div></section>
+        </section>
+        <section id="policiesView" hidden>
+          <section class="panel policies-panel"><div class="panel-head"><div><h2>Advisory policy catalog</h2><p>Configurable controls, explainable evidence and recommended remediation. No automatic enforcement.</p></div><span class="tag" id="policyRuleCount">LOADING</span></div><div class="policy-toolbar"><div id="policySummary" class="provider-helper">Loading policy definitions…</div><button id="runPolicyEvaluationBtn" type="button" class="primary-btn" hidden>Run evaluation</button></div><p id="policyActionStatus" class="provider-helper" role="status"></p><div id="policyList"></div></section>
+          <section class="panel policies-panel"><div class="panel-head"><div><h2 id="policySnapshotHeading">Recorded evaluations</h2><p>Persisted findings from the last explicit evaluation. Disabling a policy does not erase historical evidence.</p></div></div><div id="policySnapshot" class="policy-snapshot"><p class="provider-helper">No recorded evaluation yet.</p></div></section>
+        </section>
+        <section id="connectionsView" hidden>
+          <div class="provider-grid">
+            <section class="panel" style="padding:24px">
+              <div class="panel-head"><div><h2 id="connectionFormTitle">Onboard a provider</h2><p>Configure discovery access for one project, region or account at a time.</p></div></div>
+              <form id="connectionForm" class="provider-form">
+                <label>Provider<select id="providerKind" name="provider" required></select></label>
+                <label>Connection label<input name="label" required minlength="2" maxlength="100" placeholder="e.g. GAME development project"/></label>
+                <div id="scopeFields" class="scope-fields"></div>
+                <label>Credential environment-variable prefix<input name="env_prefix" placeholder="AC_FOUNDRY" required pattern="[A-Z][A-Z0-9_]*" maxlength="40" value="AC_FOUNDRY"/></label>
+                <p class="provider-helper" id="providerAuthHelp"></p>
+                <label>Authentication method <select id="connectionAuthMode" name="auth_mode" required></select></label>
+                <fieldset id="workloadFields" class="azure-credentials" hidden>
+                  <legend>Renewable workload authentication — recommended</legend>
+                  <label id="awsRoleField" hidden>AWS customer role ARN<input name="aws_role_arn" autocomplete="off" spellcheck="false" placeholder="arn:aws:iam::123456789012:role/GAMEDiscoveryRole" /></label>
+                  <label id="googleImpersonateField" hidden>Google target service account email<input name="google_impersonate_email" autocomplete="off" spellcheck="false" placeholder="game-discovery@customer-project.iam.gserviceaccount.com" /></label>
+                  <label id="entraTenantField" hidden>Customer Entra tenant ID<input name="entra_customer_tenant_id" autocomplete="off" spellcheck="false" placeholder="Directory tenant GUID" /></label>
+                  <p id="workloadHelp" class="provider-helper"></p>
+                </fieldset>
+                <fieldset id="githubCredentialsFields" class="azure-credentials" hidden>
+                  <legend>GitHub App credentials (encrypted, localhost only)</legend>
+                  <label>Numeric GitHub App ID<input name="github_app_id" inputmode="numeric" autocomplete="off" placeholder="Numeric App ID, not Iv... Client ID" /></label>
+                  <label>GitHub App private key PEM<textarea name="github_private_key_pem" rows="5" autocomplete="new-password" spellcheck="false" placeholder="-----BEGIN RSA PRIVATE KEY-----"></textarea></label>
+                  <p class="provider-helper">The server discovers the Installation ID automatically. Private key never appears in inventory or API responses.</p>
+                </fieldset>
+                <fieldset id="atlassianCredentialsFields" class="azure-credentials" hidden>
+                  <legend>Atlassian service account authentication (encrypted, localhost only)</legend>
+                  <label>Rovo MCP service account API key<input name="atlassian_api_key" type="password" autocomplete="new-password" spellcheck="false" placeholder="Service account API key" /></label>
+                  <p class="provider-helper">Enable API-key authentication in Atlassian Administration → Rovo → MCP server → Authentication first. The connector only calls initialize and tools/list, not tools/call.</p>
+                </fieldset>
+                <fieldset id="azureCredentialsFields" class="azure-credentials" hidden>
+                  <legend>Microsoft Entra credentials (optional — localhost only)</legend>
+                  <label>Azure Tenant ID<input name="azure_tenant_id" autocomplete="off" placeholder="Directory (tenant) ID" /></label>
+                  <label>Azure Client ID<input name="azure_client_id" autocomplete="off" placeholder="Application (client) ID" /></label>
+                  <label>Azure Client Secret<input name="azure_client_secret" type="password" autocomplete="new-password" placeholder="Paste client secret VALUE — not its ID" /></label>
+                  <p class="provider-helper">Enter all three to save encrypted credentials for this connection. Leave blank to use host identity or retain already saved credentials when editing. Secrets are never shown again.</p>
+                </fieldset>
+                <fieldset id="awsCredentialsFields" class="azure-credentials" hidden>
+                  <legend>AWS IAM Identity Center — temporary credentials (optional, localhost only)</legend>
+                  <label>AWS Access Key ID<input name="aws_access_key_id" autocomplete="off" spellcheck="false" placeholder="Temporary access key ID" /></label>
+                  <label>AWS Secret Access Key<input name="aws_secret_access_key" type="password" autocomplete="new-password" placeholder="Temporary secret access key" /></label>
+                  <label>AWS Session Token<textarea name="aws_session_token" rows="3" spellcheck="false" autocomplete="off" placeholder="Paste temporary session token"></textarea></label>
+                  <label>AWS session expiration (optional)<input name="aws_expires_at" type="datetime-local" aria-label="AWS temporary credential expiration" /></label>
+                  <p class="provider-helper">From IAM Identity Center → AWS access portal → temporary credentials. Enter all three fields, or leave blank to use AWS role/profile/host credentials. Optionally specify the session expiration in your Mac's local time; temporary tokens do not renew themselves. Blank fields on Edit retain encrypted credentials.</p>
+                </fieldset>
+                <fieldset id="googleCredentialsFields" class="azure-credentials" hidden>
+                  <legend>Google Agent Engine — service account credentials (optional, localhost only)</legend>
+                  <label>Service account JSON key<textarea name="google_service_account_json" rows="6" spellcheck="false" autocomplete="off" placeholder='Paste the complete service-account JSON only for a development project where keys are permitted'></textarea></label>
+                  <p class="provider-helper">Leave blank to use Google Application Default Credentials (ADC) or workload identity on the host. Only a JSON service account key is accepted here; workload-identity configuration files are configured on the host. Never paste a production key.</p>
+                </fieldset>
+                <div class="provider-notice">Local mode is loopback-only and uses the legacy tenant. Workload connections use host identities and renewable tokens. Static credentials (development only) are encrypted in SQLite using a separate key. API-only OIDC mode enforces tenant membership and roles, but a full enterprise browser sign-in flow, deployment isolation and production hardening remain to be implemented.</div>
+                <p id="editNote" class="provider-helper" hidden>Provider type cannot be changed. Changing project or region clears previously discovered records for this connection, after confirmation. External agents are never modified.</p>
+                <div class="connection-actions"><button id="connectionSubmit" class="primary-btn" type="submit">Add provider connection</button><button id="cancelConnectionEdit" class="secondary-btn" type="button" hidden>Cancel edit</button></div><span class="error" id="connectionError" role="alert"></span>
+              </form>
+            </section>
+            <section class="panel" style="padding:24px"><div class="panel-head"><div><h2>Configured connections</h2><p>Sync inventory on demand · No remote write operations</p></div></div><div id="connectionList"><p class="muted">Loading connections…</p></div></section>
+          </div>
+          <section class="panel" style="padding:24px; margin-top:20px"><div class="panel-head"><div><h2>Connector catalog</h2><p>Designed for additional vendors without changing our registry schema</p></div></div><div id="catalogList" class="catalog-grid"></div></section>
+        </section>
+        <section id="usersView" hidden>
+          <section class="panel company-settings-panel" aria-labelledby="companySettingsHeading">
+            <div class="panel-head"><div><h2 id="companySettingsHeading">Company settings</h2><p>Admin only · Set the company name used on the sign-in screen.</p></div></div>
+            <form id="companySettingsForm" class="company-settings-form">
+              <label for="companyNameInput">Company name</label>
+              <div class="connection-actions">
+                <input id="companyNameInput" name="company_name" type="text" maxlength="80" minlength="2" required autocomplete="organization" placeholder="Enter your company name" />
+                <button class="primary-btn" type="submit">Save company name</button>
+              </div>
+              <p class="provider-helper">Preview: <strong id="companyAccessPreview">Company Access</strong>. Saved in your existing GAME database.</p>
+              <div id="companySettingsMessage" role="status" aria-live="polite"></div>
+            </form>
+          </section>
+          <div id="localUsersPanel" hidden>
+            <div class="provider-grid">
+              <section class="panel rbac-panel">
+                <div class="panel-head"><div><h2>Admin · Manage users &amp; roles</h2><p>Add user accounts and assign inherited roles and resource scopes.</p></div></div>
+                <form id="localUserForm" class="provider-form">
+                  <label>Username<input name="username" id="localUsername" required minlength="3" maxlength="64" autocomplete="off" placeholder="e.g. jsmith"></label>
+                  <label>Display name<input name="display_name" maxlength="120" autocomplete="off" placeholder="Jane Smith"></label>
+                  <label>Email<input name="email" type="email" maxlength="254" autocomplete="off" placeholder="person@company.com"></label>
+                  <label id="initialPasswordLabel">Initial temporary password<input name="initial_password" id="initialLocalPassword" type="password" minlength="15" autocomplete="new-password" placeholder="At least 15 characters"></label>
+                  <label>Primary role<select name="role" id="localRole" required></select></label>
+                  <div class="rbac-info">Edit an existing user to customize permissions within the primary role. Selecting a higher role automatically selects its inherited permissions; selecting a permission selects prerequisites. Business approvals remain Business Owner-only. API permissions are always enforced by the server.</div>
+                  <div id="localEffectiveCaps" class="rbac-choices"></div>
+                  <label>Resource scope<select id="localScope" name="scope_kind"><option value="selected">Selected connections / agents</option><option value="all">All company resources</option></select></label>
+                  <div id="localScopeChoices" class="rbac-scopes"><div><strong>Provider connections</strong><div id="localConnectionChoices" class="rbac-choices"></div></div><div><strong>Individual agents</strong><div id="localAgentChoices" class="rbac-choices"></div></div></div>
+                  <p class="provider-helper">New and reset passwords must be changed at next login. Passwords are never listed or displayed again.</p>
+                  <div class="connection-actions"><button type="submit" class="primary-btn" id="localSaveBtn">Create user</button><button type="button" class="secondary-btn" id="localCancel">Clear form</button></div><span id="localUserError" class="error" role="alert"></span>
+                </form>
+              </section>
+              <section class="panel rbac-panel"><div class="panel-head"><div><h2>Company user accounts</h2><p>Only company Admins can access this area.</p></div></div><div id="localUserList" class="rbac-members"></div></section>
+            </div>
+          </div>
+          <div id="oidcUsersPanel" hidden>
+          <div class="provider-grid">
+            <section class="panel rbac-panel">
+              <div class="panel-head"><div><h2>Assign company access</h2><p>Roles inherit their lower-level capabilities automatically.</p></div></div>
+              <form id="membershipForm" class="provider-form">
+                <label>Identity issuer (OIDC)<input name="issuer" required type="url" placeholder="https://login.company.com/tenant" autocomplete="off" /></label>
+                <label>Identity subject (immutable user ID)<input name="subject" required placeholder="OIDC sub claim — not display name" autocomplete="off" /></label>
+                <label>Primary role<select name="role" id="memberRole" required></select></label>
+                <div class="rbac-info">Inherited roles and capabilities are shown below. Select one primary role; all applicable lower-level permissions are automatically selected and enforced by the API.</div>
+                <div class="rbac-columns"><div><h3>Effective roles</h3><div id="inheritedRoles" class="rbac-choices"></div></div><div><h3>Effective capabilities</h3><div id="effectiveCapabilities" class="rbac-choices"></div></div></div>
+                <label>Resource scope<select id="memberScope" name="scope_kind"><option value="selected">Selected connections / agents</option><option value="all">All company resources</option></select></label>
+                <div id="scopeChoices" class="rbac-scopes"><div><strong>Provider connections</strong><div id="memberConnectionChoices" class="rbac-choices"></div></div><div><strong>Individual agents</strong><div id="memberAgentChoices" class="rbac-choices"></div></div></div>
+                <div class="rbac-info">Only a verified OIDC login can exercise these assigned roles. The localhost account remains Admin for development; this screen does not impersonate other users.</div>
+                <div class="connection-actions"><button type="submit" class="primary-btn">Save user access</button><button type="button" id="cancelMemberEdit" class="secondary-btn">Clear form</button></div><span id="membershipError" class="error" role="alert"></span>
+              </form>
+            </section>
+            <section class="panel rbac-panel"><div class="panel-head"><div><h2>Company users</h2><p>Actual OIDC memberships; the localhost Admin is implicit and is not listed here.</p></div></div><div id="memberList" class="rbac-members"><p class="muted">Loading users…</p></div></section>
+          </div>
+          </div>
+        </section>
+        <section id="auditView" hidden>
+          <section class="panel audit-panel"><div class="panel-head"><div><h2>Audit Log</h2><p>Recorded administrative, connection, and business approval actions.</p></div><button type="button" class="secondary-btn" id="auditRefresh">Refresh</button></div>
+            <div class="filter-controls audit-filters"><input id="auditSearch" placeholder="Filter actor, action or resource…" aria-label="Search audit log"/><select id="auditType"><option value="">All actions</option><option value="agent.approval">Business decisions</option><option value="agent.business_owner">Owner assignment</option><option value="connection.">Provider connections</option><option value="local-user.">User management</option><option value="auth.">Sign-in activity</option></select></div>
+            <div class="table-wrap"><table><thead><tr><th>WHEN (UTC)</th><th>ACTION</th><th>ACTOR</th><th>RESOURCE</th><th>DETAILS</th></tr></thead><tbody id="auditTable"><tr><td colspan="5">Loading audit records…</td></tr></tbody></table></div>
+            <p class="provider-helper">Events are generated by GAME; provider-side audit activity requires separate integrations.</p>
+          </section>
+        </section>
+        <p class="footnote">GAME 0.3.5 · Supported by Happili Platform · <a href="https://github.com/Happili-platform/game-community" target="_blank" rel="noopener noreferrer">Source code (AGPLv3)</a></p>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="adminResetDialog" class="modal">
+    <form id="adminResetForm" class="form-body">
+      <div class="modal-header"><div><p class="eyebrow">ADMIN / ACCOUNT SECURITY</p><h2>Reset a user's password</h2><p id="adminResetHelp">The user will be required to change it on first sign-in.</p></div><button type="button" data-close="adminResetDialog" class="icon-btn">✕</button></div>
+      <label>New temporary password<input name="temporary_password" type="password" minlength="15" maxlength="256" autocomplete="new-password" required placeholder="At least 15 characters" /></label>
+      <label>Confirm temporary password<input name="confirm_password" type="password" minlength="15" maxlength="256" autocomplete="new-password" required /></label>
+      <div class="modal-actions"><span id="adminResetError" class="error" role="alert"></span><button type="button" class="secondary-btn" data-close="adminResetDialog">Cancel</button><button class="primary-btn" type="submit">Reset password</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="agentDialog" class="modal"><form id="agentForm" class="form-body"><div class="modal-header"><div><p class="eyebrow">REGISTRY</p><h2>Register unmanaged agent</h2><p>Fallback only when a provider cannot discover this agent. The resulting record is manually declared and not provider-verified.</p></div><button type="button" data-close="agentDialog" class="icon-btn" aria-label="Close">✕</button></div>
+    <div class="form-grid"><label class="full">Provider connection (optional)<select name="connection_id" id="agentConnection"><option value="">Standalone manual record</option></select></label><label class="full">Agent name<input name="name" required minlength="2" maxlength="100" placeholder="e.g. Invoice Review Agent" /></label><label>Platform / provider<input name="provider" required minlength="2" maxlength="100" placeholder="e.g. Custom / Python" /></label><label>Owner email<input name="owner_email" type="email" placeholder="owner@company.com"/></label><label>Environment<select name="environment"><option value="development">Development</option><option value="staging">Staging</option><option value="production">Production</option></select></label><p class="provider-helper full">Business approval is requested separately after registration. Only the assigned Business Owner can approve or reject.</p><label>Monthly budget (USD)<input name="budget_usd" type="number" value="100" min="0" step="0.01" required /></label><label>Cost center<input name="cost_center" placeholder="e.g. IT-01" /></label><label class="full">Description<textarea name="description" rows="2" placeholder="What does this agent do?"></textarea></label><label class="check full"><input name="sensitive_access" type="checkbox"/> Declared access to sensitive systems or data</label></div>
+    <div class="modal-actions"><span id="formError" class="error" role="alert"></span><button type="button" data-close="agentDialog" class="secondary-btn">Cancel</button><button class="primary-btn" type="submit">Register unmanaged agent</button></div>
+  </form></dialog>
+
+  <dialog id="detailDialog" class="modal detail-modal"><div class="form-body"><div class="modal-header"><div><p class="eyebrow">AGENT DETAILS</p><h2 id="detailName"></h2><p id="detailDescription"></p></div><button type="button" data-close="detailDialog" class="icon-btn" aria-label="Close">✕</button></div><div id="detailContent"></div>
+    <section id="governancePanel" class="detail-section governance-panel"><h3>Business ownership &amp; approval</h3>
+      <p class="provider-helper">Business authorization is separate from technical administration and provider metadata. No cloud resources are modified.</p>
+      <div id="governanceSummary"></div>
+      <form id="businessOwnerForm" class="governance-form" hidden><label>Accountable Business Owner <select id="businessOwnerSelect" required></select></label><button type="submit" class="secondary-btn">Assign owner</button></form>
+      <form id="approvalRequestForm" class="governance-form" hidden><label>Requested monthly budget (USD)<input id="approvalBudget" type="number" min="0" step="0.01" required value="0"></label><label>Cost center<input id="approvalCostCenter" maxlength="80" minlength="2" required placeholder="e.g. FIN-001"></label><label>Business justification <textarea id="approvalJustification" rows="2" minlength="10" maxlength="1500" required placeholder="Why is this agent needed and what business value does it deliver?"></textarea></label><button type="submit" class="primary-btn">Submit for business approval</button></form>
+      <form id="approvalDecisionForm" class="governance-form" hidden><label>Decision justification <textarea id="approvalDecisionReason" rows="2" minlength="10" maxlength="1500" required placeholder="State budget decision and conditions"></textarea></label><div class="connection-actions"><button type="button" data-decision="approved" class="primary-btn">Approve</button><button type="button" data-decision="rejected" class="secondary-btn">Reject</button></div></form>
+      <p id="governanceError" class="error" role="alert"></p>
+    </section>
+    <div class="usage-add" id="usageAddBox"><h3>Record usage event</h3><p>Add a manual test event to evaluate spending and cost alerts.</p><form id="usageForm" class="usage-form"><input name="cost_usd" type="number" min="0" step="0.01" placeholder="Cost in USD" aria-label="Cost in USD" required/><select name="outcome" aria-label="Outcome"><option value="success">Success</option><option value="failure">Failure</option><option value="unknown">Unknown</option></select><button type="submit" class="primary-btn">Add event</button></form><div id="usageError" class="error" role="alert"></div></div>
+    <div class="modal-actions"><button type="button" data-close="detailDialog" class="secondary-btn">Close</button></div></div></dialog>
+
+  <script src="/static/app.js?v=0.3.5-provider-filter-zoom1" defer></script>
+</body>
+</html>

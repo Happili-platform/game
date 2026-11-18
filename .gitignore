@@ -1,0 +1,62 @@
+
+# ============================================
+# GAMe - Happili Platform
+# ============================================
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+*.key
+*.pem
+*.p12
+*.pfx
+master.key
+secrets/
+credentials/
+*credentials*.json
+*service-account*.json
+
+# Local databases and application data
+data/
+*.db
+*.db.*
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db-wal
+*.db-shm
+
+# Logs and backups
+*.log
+logs/
+backups/
+*.bak
+
+# Test and coverage artifacts
+.coverage
+htmlcov/
+
+# macOS
+.DS_Store
+
+# IDE settings
+.idea/
+.vscode/
+
+# Terraform state (if introduced)
+*.tfstate
+*.tfstate.*

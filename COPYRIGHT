@@ -1,0 +1,44 @@
+GAMe — Copyright and Licensing Notice
+==========================================
+
+Copyright (C) 2026 Siddhartha Pillutla
+Published and maintained by Happili Platform
+
+The original first-party GAMe source code is offered under the GNU
+Affero General Public License, Version 3 only (AGPL-3.0-only), except where
+individual files or third-party materials state different applicable terms.
+See LICENSE for the full AGPLv3 license text.
+
+Original-author attribution
+---------------------------
+Siddhartha Pillutla identifies himself as the independent original developer
+and copyright holder of the original first-party GAMe work, subject
+to any legally applicable third-party rights, employment or contract terms,
+and protectability requirements.
+
+Happili Platform is the publisher and maintainer of GAMe with the
+original author's authorization. The GitHub organization and publishing
+identity do not themselves establish or transfer ownership of copyright.
+No assignment of copyright to a legal entity is asserted by this notice.
+
+Contributor and third-party rights
+----------------------------------
+Other contributors retain copyright in their contributions unless validly
+agreed otherwise. A Developer Certificate of Origin (DCO) sign-off does not
+transfer copyright or grant proprietary relicensing rights.
+
+Third-party source, dependencies, assets, and documentation remain subject
+to their respective copyrights and licenses. Preserve all applicable notices.
+AI-assisted material is only protected to the extent applicable law recognizes
+human-authored copyrightable expression.
+
+Pre-publication due diligence
+----------------------------
+Before making the repository public, the publisher should retain a private
+record confirming the author's rights and publishing authorization; check
+applicable employment, consulting, and invention-assignment obligations; and
+review contributor and third-party rights. Consult qualified counsel if any
+ownership, authority, or protectability question remains.
+
+Project: https://github.com/Happili-platform/game
+License: https://www.gnu.org/licenses/agpl-3.0.html
