@@ -215,3 +215,74 @@ def test_build_version_matches_file_and_health(client):
     from pathlib import Path
     assert Path(__file__).resolve().parents[1].joinpath('src/VERSION').read_text().strip() == __version__
     assert client.get('/api/health').json()['version'] == __version__
+
+
+def test_f01_duplicate_discovery_preserves_inventory(client, monkeypatch):
+    from game.db import connection
+
+    created = client.post('/api/connections', json={
+        'provider': 'microsoft_foundry',
+        'label': 'F01 Foundry',
+        'env_prefix': 'F01_FOUNDRY',
+        'scope': {
+            'project_endpoint':
+                'https://example.services.ai.azure.com/api/projects/test'
+        },
+    })
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    monkeypatch.setattr(
+        connectors, 'discover',
+        lambda configured, azure_credentials=None: [
+            connectors.DiscoveredAgent(
+                'provider-id-1', 'Original', 'Microsoft Foundry'
+            )
+        ],
+    )
+
+    first = client.post(
+        f'/api/connections/{connection_id}/discover'
+    )
+    assert first.status_code == 200, first.text
+
+    with connection() as db:
+        before = [
+            tuple(row) for row in db.execute(
+                """SELECT id, external_id, name, discovery_last_seen
+                   FROM discovered_agents
+                   WHERE connection_id=?
+                   ORDER BY id""",
+                (connection_id,),
+            )
+        ]
+
+    monkeypatch.setattr(
+        connectors, 'discover',
+        lambda configured, azure_credentials=None: [
+            connectors.DiscoveredAgent(
+                'provider-id-1', 'Changed', 'Microsoft Foundry'
+            ),
+            connectors.DiscoveredAgent(
+                'provider-id-1', 'Duplicate', 'Microsoft Foundry'
+            ),
+        ],
+    )
+
+    rejected = client.post(
+        f'/api/connections/{connection_id}/discover'
+    )
+    assert rejected.status_code == 409, rejected.text
+
+    with connection() as db:
+        after = [
+            tuple(row) for row in db.execute(
+                """SELECT id, external_id, name, discovery_last_seen
+                   FROM discovered_agents
+                   WHERE connection_id=?
+                   ORDER BY id""",
+                (connection_id,),
+            )
+        ]
+
+    assert after == before

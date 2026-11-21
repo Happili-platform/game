@@ -1110,8 +1110,17 @@ def sync_connection(connection_id: str, request: Request):
     # cause partial inventory writes. A successful empty response does not remove old records.
     try:
         agents = _discover_with_connection(configured)
+        from .identity import validate_discovery_batch, IdentityConflict
+        try:
+            validate_discovery_batch(agents)
+        except IdentityConflict as exc:
+            raise HTTPException(
+                status_code=409, detail=str(exc)
+            ) from exc
         if len(agents) > 10000:
             raise connectors.DiscoveryError("Over 10,000 agents returned; narrow the scope")
+    except HTTPException:
+        raise
     except connectors.DiscoveryError as exc:
         with connection() as db:
             db.execute("UPDATE provider_connections SET last_error=? WHERE id=? AND tenant_id=?", (str(exc), connection_id, actor.tenant_id))
@@ -1176,6 +1185,13 @@ def collector_sync_azure_inventory(request: Request):
             raise HTTPException(503, 'Microsoft Foundry discovery failed; verify existing connection credentials and project permissions') from None
         if len(discovered) > 10000:
             raise HTTPException(503, 'Foundry discovery exceeds the supported inventory limit')
+        from .identity import validate_discovery_batch, IdentityConflict
+        try:
+            validate_discovery_batch(discovered)
+        except IdentityConflict as exc:
+            raise HTTPException(
+                status_code=409, detail=str(exc)
+            ) from exc
         snapshots.append((row, discovered))
     now = iso(utc_now())
     with connection() as db:
