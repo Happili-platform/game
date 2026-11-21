@@ -352,3 +352,30 @@ def backfill_legacy_references(
         db.execute("ROLLBACK TO SAVEPOINT f01_legacy_backfill")
         db.execute("RELEASE SAVEPOINT f01_legacy_backfill")
         raise
+
+
+def validate_discovery_batch(items) -> int:
+    """Reject incomplete or duplicate external identities.
+
+    Validate the complete provider response before any inventory
+    database writes. Duplicate identities fail closed even when
+    their other fields appear identical.
+    """
+    seen = set()
+
+    for item in items:
+        external_id = getattr(item, "external_id", None)
+
+        if not isinstance(external_id, str) or not external_id.strip():
+            raise IdentityConflict(
+                "Discovery contains an empty external identity"
+            )
+
+        if external_id in seen:
+            raise IdentityConflict(
+                "Discovery contains duplicate external identities"
+            )
+
+        seen.add(external_id)
+
+    return len(seen)
