@@ -252,3 +252,103 @@ def resolve_external_identity(
         db.execute("ROLLBACK TO SAVEPOINT f01_identity_resolution")
         db.execute("RELEASE SAVEPOINT f01_identity_resolution")
         raise
+
+
+def backfill_legacy_references(
+    db: sqlite3.Connection,
+) -> dict[str, int]:
+    """Associate existing legacy agents with immutable identities.
+
+    Preconditions:
+    - Existing GAMe schema has been initialized.
+    - F01 identity tables have been initialized.
+    - Caller controls the database transaction.
+
+    This function never updates or deletes legacy rows and never
+    infers provider identity from names or incomplete scopes.
+    """
+
+    created = 0
+    existing = 0
+    now = iso(utc_now())
+
+    # A savepoint makes the whole backfill atomic, including when
+    # the caller is already inside a larger transaction.
+    db.execute("SAVEPOINT f01_legacy_backfill")
+
+    try:
+        for table in ("agents", "discovered_agents"):
+            rows = db.execute(
+                f"""
+                SELECT id, tenant_id
+                FROM {table}
+                ORDER BY tenant_id, id
+                """
+            ).fetchall()
+
+            for row in rows:
+                tenant_id = _required(
+                    row["tenant_id"], "tenant_id"
+                )
+                legacy_id = _required(
+                    row["id"], "legacy_agent_id"
+                )
+
+                found = db.execute(
+                    """
+                    SELECT canonical_agent_id
+                    FROM agent_legacy_references
+                    WHERE tenant_id=?
+                      AND source_table=?
+                      AND legacy_agent_id=?
+                    """,
+                    (tenant_id, table, legacy_id),
+                ).fetchone()
+
+                if found:
+                    existing += 1
+                    continue
+
+                canonical_id = "game-agt-" + uuid4().hex
+
+                db.execute(
+                    """
+                    INSERT INTO canonical_agents (
+                        id, tenant_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (canonical_id, tenant_id, now, now),
+                )
+
+                db.execute(
+                    """
+                    INSERT INTO agent_legacy_references (
+                        tenant_id,
+                        source_table,
+                        legacy_agent_id,
+                        canonical_agent_id,
+                        created_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        tenant_id,
+                        table,
+                        legacy_id,
+                        canonical_id,
+                        now,
+                    ),
+                )
+
+                created += 1
+
+        db.execute("RELEASE SAVEPOINT f01_legacy_backfill")
+
+        return {
+            "created": created,
+            "existing": existing,
+        }
+
+    except Exception:
+        db.execute("ROLLBACK TO SAVEPOINT f01_legacy_backfill")
+        db.execute("RELEASE SAVEPOINT f01_legacy_backfill")
+        raise
