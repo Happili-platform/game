@@ -469,3 +469,140 @@ def test_f01_empty_connection_can_be_removed(client):
     )
 
     assert removed.status_code == 200, removed.text
+
+
+@pytest.mark.parametrize(
+    "resource_type",
+    ["provider_inventory", "trust_tools", "trust_links"],
+)
+def test_f01_history_blocks_connection_removal(
+    client, resource_type
+):
+    from game.db import connection
+
+    created = client.post('/api/connections', json={
+        'provider': 'github_inventory',
+        'label': 'F01 Evidence',
+        'env_prefix': 'F01_GITHUB',
+        'scope': {'organization': 'Happili-platform'},
+    })
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    _seed_f01_evidence(connection_id, resource_type)
+
+    removed = client.delete(
+        f'/api/connections/{connection_id}?remove_inventory=true'
+    )
+    assert removed.status_code == 409, removed.text
+
+    with connection() as db:
+        assert _f01_evidence_exists(
+            db, connection_id, resource_type
+        )
+
+
+@pytest.mark.parametrize(
+    "resource_type",
+    ["provider_inventory", "trust_tools", "trust_links"],
+)
+def test_f01_history_blocks_connection_scope_change(
+    client, resource_type
+):
+    from game.db import connection
+
+    created = client.post('/api/connections', json={
+        'provider': 'github_inventory',
+        'label': 'F01 Evidence',
+        'env_prefix': 'F01_GITHUB',
+        'scope': {'organization': 'Happili-platform'},
+    })
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    _seed_f01_evidence(connection_id, resource_type)
+
+    changed = client.patch(
+        f'/api/connections/{connection_id}',
+        json={
+            'label': 'Changed',
+            'env_prefix': 'F01_GITHUB',
+            'scope': {'organization': 'Other-platform'},
+            'clear_inventory_on_scope_change': True,
+        },
+    )
+    assert changed.status_code == 409, changed.text
+
+    with connection() as db:
+        assert _f01_evidence_exists(
+            db, connection_id, resource_type
+        )
+
+    current = client.get('/api/connections').json()
+    assert current[0]['scope'] == {
+        'organization': 'Happili-platform'
+    }
+
+
+def _seed_f01_evidence(connection_id, resource_type):
+    from game.db import connection
+
+    with connection() as db:
+        now = "2026-11-25T00:00:00Z"
+
+        if resource_type == "provider_inventory":
+            db.execute("""
+                INSERT INTO provider_inventory
+                (id, tenant_id, connection_id, kind,
+                 external_id, name, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "f01-inventory", "local-dev", connection_id,
+                "repository", "repo-123", "Example", now, now,
+            ))
+            return
+
+        db.execute("""
+            INSERT INTO trust_tools
+            (id, tenant_id, connection_id, namespace,
+             external_id, name, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "f01-tool", "local-dev", connection_id,
+            "github", "read", "Read", now, now,
+        ))
+
+        if resource_type == "trust_links":
+            db.execute("""
+                INSERT INTO trust_links
+                (id, tenant_id, agent_id, tool_id,
+                 evidence_type, evidence_reference,
+                 first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "f01-link", "local-dev", "agt-example",
+                "f01-tool", "declared_configuration",
+                "test:evidence", now, now,
+            ))
+
+
+def _f01_evidence_exists(db, connection_id, resource_type):
+    if resource_type == "provider_inventory":
+        return db.execute(
+            "SELECT COUNT(*) FROM provider_inventory "
+            "WHERE connection_id=?",
+            (connection_id,),
+        ).fetchone()[0] == 1
+
+    tool_exists = db.execute(
+        "SELECT COUNT(*) FROM trust_tools WHERE connection_id=?",
+        (connection_id,),
+    ).fetchone()[0] == 1
+
+    if resource_type == "trust_tools":
+        return tool_exists
+
+    return tool_exists and db.execute(
+        "SELECT COUNT(*) FROM trust_links "
+        "WHERE id='f01-link' AND tool_id='f01-tool'"
+    ).fetchone()[0] == 1

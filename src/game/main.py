@@ -1025,6 +1025,28 @@ def test_connection(connection_id: str, request: Request):
     return {"connected": True, "visible_agents": len(agents), "notice": "Read-only test. Inventory unchanged."}
 
 
+
+def _connection_history_counts(db, tenant_id, connection_id):
+    """Count evidence that must survive connection changes."""
+    counts = {}
+    for table in ("discovered_agents", "provider_inventory", "trust_tools"):
+        counts[table] = db.execute(
+            f"SELECT COUNT(*) FROM {table} "
+            "WHERE tenant_id=? AND connection_id=?",
+            (tenant_id, connection_id),
+        ).fetchone()[0]
+
+    counts["trust_links"] = db.execute("""
+        SELECT COUNT(*)
+        FROM trust_links l
+        JOIN trust_tools t
+          ON t.id=l.tool_id AND t.tenant_id=l.tenant_id
+        WHERE l.tenant_id=? AND t.connection_id=?
+    """, (tenant_id, connection_id)).fetchone()[0]
+
+    return counts
+
+
 @app.patch("/api/connections/{connection_id}")
 def edit_connection(connection_id: str, payload: ConnectionUpdate, request: Request):
     actor = require(request, 'connection_admin')
@@ -1044,28 +1066,17 @@ def edit_connection(connection_id: str, payload: ConnectionUpdate, request: Requ
         credential_changed = (row["env_prefix"] != payload.env_prefix or row['auth_mode'] != auth_mode or
                               json.loads(row['auth_config_json']) != auth_config)
         target_changed = scope_changed or credential_changed
-        count = db.execute("SELECT COUNT(*) FROM discovered_agents WHERE connection_id=? AND tenant_id=?", (connection_id, actor.tenant_id)).fetchone()[0]
-        count += db.execute('SELECT COUNT(*) FROM provider_inventory WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id)).fetchone()[0]
-        discovered_count = db.execute(
-            "SELECT COUNT(*) FROM discovered_agents "
-            "WHERE connection_id=? AND tenant_id=?",
-            (connection_id, actor.tenant_id)
-        ).fetchone()[0]
-        if target_changed and discovered_count:
+        history = _connection_history_counts(
+            db, actor.tenant_id, connection_id
+        )
+        count = sum(history.values())
+        if target_changed and count:
             raise HTTPException(
                 409,
-                "Connection has discovered agent history. "
-                "Changing its identity or credentials requires "
-                "a non-destructive retirement or migration workflow."
+                "Connection contains historical agent inventory "
+                "or Trust Graph evidence. Destructive changes "
+                "require a non-destructive retirement workflow."
             )
-        if target_changed and count and not payload.clear_inventory_on_scope_change:
-            raise HTTPException(409, detail=f"This identity/scope has {count} previously discovered agent(s). Confirm clearing stale inventory records before changing the connection target.")
-        if target_changed and count:
-            db.execute('DELETE FROM trust_links WHERE tenant_id=? AND tool_id IN (SELECT id FROM trust_tools WHERE connection_id=? AND tenant_id=?)',(actor.tenant_id, connection_id, actor.tenant_id))
-            db.execute('DELETE FROM trust_tools WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id))
-            db.execute('DELETE FROM provider_inventory WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id))
-            # Old inventory is no longer valid for the new provider identity or project/region.
-            db.execute("DELETE FROM discovered_agents WHERE connection_id=? AND tenant_id=?", (connection_id, actor.tenant_id))
         reset_sync = target_changed
         if reset_sync:
             _clear_saved_credentials(db, connection_id, actor.tenant_id)
@@ -1091,19 +1102,22 @@ def remove_connection(connection_id: str, request: Request, remove_inventory: bo
         row = db.execute("SELECT id FROM provider_connections WHERE id=? AND tenant_id=?", (connection_id, actor.tenant_id)).fetchone()
         if row is None:
             raise HTTPException(404, "Provider connection not found")
-        count = db.execute("SELECT COUNT(*) FROM discovered_agents WHERE connection_id=? AND tenant_id=?", (connection_id, actor.tenant_id)).fetchone()[0]
+        history = _connection_history_counts(
+            db, actor.tenant_id, connection_id
+        )
+        count = sum(history.values())
         if count:
             raise HTTPException(
                 409,
-                "Connection has discovered agent history. "
-                "Delete is blocked until a non-destructive "
-                "retirement or archival workflow is available."
+                "Connection contains historical agent inventory "
+                "or Trust Graph evidence. Removal is blocked "
+                "until non-destructive retirement is supported."
             )
-        db.execute('DELETE FROM trust_links WHERE tenant_id=? AND tool_id IN (SELECT id FROM trust_tools WHERE connection_id=? AND tenant_id=?)',(actor.tenant_id, connection_id, actor.tenant_id))
-        db.execute('DELETE FROM trust_tools WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id))
-        db.execute('DELETE FROM provider_inventory WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id))
-        db.execute("DELETE FROM discovered_agents WHERE connection_id=? AND tenant_id=?", (connection_id, actor.tenant_id))
-        db.execute("DELETE FROM provider_connections WHERE id=? AND tenant_id=?", (connection_id, actor.tenant_id))
+        db.execute(
+            "DELETE FROM provider_connections "
+            "WHERE id=? AND tenant_id=?",
+            (connection_id, actor.tenant_id),
+        )
         _audit(db, actor, 'connection.remove', connection_id)
         return {"removed": True, "removed_inventory_count": count}
 
