@@ -379,3 +379,118 @@ def validate_discovery_batch(items) -> int:
         seen.add(external_id)
 
     return len(seen)
+
+
+def bind_discovered_legacy_identity(
+    db: sqlite3.Connection,
+    *,
+    tenant_id: str,
+    legacy_agent_id: str,
+    evidence_reference: str,
+) -> str:
+    """Bind a discovered legacy agent to an authoritative identity.
+
+    Preconditions:
+    - F01 tables exist and legacy backfill has run.
+    - The provider connection is trusted and was validated.
+    - Evidence comes from successful provider discovery.
+    - Caller owns the transaction.
+
+    Does not create canonical agents or alter historical agent IDs.
+    """
+    import json
+
+    from .identity_scope import authoritative_scope
+
+    tenant_id = _required(tenant_id, "tenant_id")
+    legacy_agent_id = _required(legacy_agent_id, "legacy_agent_id")
+    evidence_reference = _required(
+        evidence_reference, "evidence_reference"
+    )
+
+    row = db.execute("""
+        SELECT a.external_id, a.tenant_id, a.connection_id,
+               c.provider, c.scope_json, c.auth_mode,
+               c.auth_config_json
+        FROM discovered_agents a
+        JOIN provider_connections c
+          ON c.id = a.connection_id
+         AND c.tenant_id = a.tenant_id
+        WHERE a.id=? AND a.tenant_id=?
+    """, (legacy_agent_id, tenant_id)).fetchone()
+
+    if row is None:
+        raise IdentityConflict(
+            "Discovered agent or provider connection not found"
+        )
+
+    reference = db.execute("""
+        SELECT canonical_agent_id
+        FROM agent_legacy_references
+        WHERE tenant_id=?
+          AND source_table='discovered_agents'
+          AND legacy_agent_id=?
+    """, (tenant_id, legacy_agent_id)).fetchone()
+
+    if reference is None:
+        raise IdentityConflict(
+            "Legacy backfill must complete before identity binding"
+        )
+
+    connection_info = {
+        "provider": row["provider"],
+        "scope": json.loads(row["scope_json"]),
+        "auth_mode": row["auth_mode"],
+        "auth_config": json.loads(row["auth_config_json"]),
+    }
+    scope_key = authoritative_scope(connection_info)
+    provider = row["provider"]
+    external_id = _required(row["external_id"], "external_id")
+    canonical_id = reference["canonical_agent_id"]
+
+    existing = db.execute("""
+        SELECT canonical_agent_id, verification_status
+        FROM agent_identity_mappings
+        WHERE tenant_id=? AND provider=?
+          AND scope_key=? AND external_id=?
+    """, (
+        tenant_id, provider, scope_key, external_id
+    )).fetchone()
+
+    if existing is not None:
+        if (
+            existing["canonical_agent_id"] != canonical_id
+            or existing["verification_status"] != "verified"
+        ):
+            raise IdentityConflict(
+                "External identity conflicts with an existing mapping"
+            )
+        return canonical_id
+
+    now = iso(utc_now())
+
+    db.execute("SAVEPOINT f01_bind_legacy")
+    try:
+        db.execute("""
+            INSERT INTO agent_identity_mappings (
+                id, tenant_id, canonical_agent_id,
+                provider, scope_key, external_id,
+                connection_id, verification_status,
+                evidence_reference, first_seen, last_seen
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?)
+        """, (
+            "map-" + uuid4().hex,
+            tenant_id, canonical_id, provider,
+            scope_key, external_id, row["connection_id"],
+            evidence_reference, now, now
+        ))
+        db.execute("RELEASE SAVEPOINT f01_bind_legacy")
+    except sqlite3.IntegrityError as exc:
+        db.execute("ROLLBACK TO SAVEPOINT f01_bind_legacy")
+        db.execute("RELEASE SAVEPOINT f01_bind_legacy")
+        raise IdentityConflict(
+            "External identity mapping constraint conflict"
+        ) from exc
+
+    return canonical_id
