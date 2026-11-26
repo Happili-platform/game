@@ -61,6 +61,42 @@ def discovery_identity_preflight(
             count,
         )
 
+    # F01.13.2: Only Google Agent Engine has a validated
+    # provider-resource binding in this increment.
+    # AWS requires runtime STS account attestation; a role ARN
+    # from configuration is not sufficient on its own.
+    if provider != "google_agent_engine":
+        return IdentityPreflight(
+            False, provider, scope_key,
+            "Provider-specific authenticated resource verification pending",
+            count,
+        )
+
+    import re
+
+    scope = connection.get("scope") or {}
+    project = scope.get("project_id", "")
+    location = scope.get("location", "")
+
+    expected_prefix = (
+        f"projects/{project}/locations/{location}/reasoningEngines/"
+    )
+
+    for agent in agents:
+        external_id = agent.external_id
+        if not isinstance(external_id, str) or not (
+            external_id.startswith(expected_prefix)
+            and re.fullmatch(
+                r"[A-Za-z0-9_-]+",
+                external_id[len(expected_prefix):],
+            )
+        ):
+            return IdentityPreflight(
+                False, provider, scope_key,
+                "Discovered resource does not match authenticated scope",
+                count,
+            )
+
     return IdentityPreflight(
         True, provider, scope_key,
         "Identity preflight passed",
