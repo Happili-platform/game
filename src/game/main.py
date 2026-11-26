@@ -1046,6 +1046,18 @@ def edit_connection(connection_id: str, payload: ConnectionUpdate, request: Requ
         target_changed = scope_changed or credential_changed
         count = db.execute("SELECT COUNT(*) FROM discovered_agents WHERE connection_id=? AND tenant_id=?", (connection_id, actor.tenant_id)).fetchone()[0]
         count += db.execute('SELECT COUNT(*) FROM provider_inventory WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id)).fetchone()[0]
+        discovered_count = db.execute(
+            "SELECT COUNT(*) FROM discovered_agents "
+            "WHERE connection_id=? AND tenant_id=?",
+            (connection_id, actor.tenant_id)
+        ).fetchone()[0]
+        if target_changed and discovered_count:
+            raise HTTPException(
+                409,
+                "Connection has discovered agent history. "
+                "Changing its identity or credentials requires "
+                "a non-destructive retirement or migration workflow."
+            )
         if target_changed and count and not payload.clear_inventory_on_scope_change:
             raise HTTPException(409, detail=f"This identity/scope has {count} previously discovered agent(s). Confirm clearing stale inventory records before changing the connection target.")
         if target_changed and count:
@@ -1080,8 +1092,13 @@ def remove_connection(connection_id: str, request: Request, remove_inventory: bo
         if row is None:
             raise HTTPException(404, "Provider connection not found")
         count = db.execute("SELECT COUNT(*) FROM discovered_agents WHERE connection_id=? AND tenant_id=?", (connection_id, actor.tenant_id)).fetchone()[0]
-        if count and not remove_inventory:
-            raise HTTPException(409, detail=f"Connection has {count} discovered agent(s). Confirm local inventory removal.")
+        if count:
+            raise HTTPException(
+                409,
+                "Connection has discovered agent history. "
+                "Delete is blocked until a non-destructive "
+                "retirement or archival workflow is available."
+            )
         db.execute('DELETE FROM trust_links WHERE tenant_id=? AND tool_id IN (SELECT id FROM trust_tools WHERE connection_id=? AND tenant_id=?)',(actor.tenant_id, connection_id, actor.tenant_id))
         db.execute('DELETE FROM trust_tools WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id))
         db.execute('DELETE FROM provider_inventory WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id))

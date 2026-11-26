@@ -122,33 +122,73 @@ def test_edit_connection_without_secrets_and_provider_is_immutable(client):
     }).status_code == 404
 
 
-def test_scope_change_requires_clear_inventory_and_remove_is_explicit(client, monkeypatch):
+def test_scope_change_requires_clear_inventory_and_remove_is_explicit(
+    client, monkeypatch
+):
+    from game.db import connection
+
     created = client.post('/api/connections', json={
-        'provider': 'aws_agentcore', 'label': 'AWS', 'env_prefix': 'AC_AWS', 'scope': {'region': 'us-east-1'}
+        'provider': 'aws_agentcore',
+        'label': 'AWS',
+        'env_prefix': 'AC_AWS',
+        'scope': {'region': 'us-east-1'},
     }).json()
-    monkeypatch.setattr(connectors, 'discover', lambda connection, azure_credentials=None: [
-        connectors.DiscoveredAgent('agent-one', 'Agent One', 'AWS Bedrock AgentCore')])
-    assert client.post('/api/connections/' + created['id'] + '/discover').status_code == 200
-    assert len(client.get('/api/agents').json()) == 1
-    altered = {'label': 'AWS West', 'env_prefix': 'AC_AWS', 'scope': {'region':'us-west-2'}}
-    blocked = client.patch('/api/connections/' + created['id'], json=altered)
-    assert blocked.status_code == 409
-    assert len(client.get('/api/agents').json()) == 1
-    changed = client.patch('/api/connections/' + created['id'], json={
-        **altered, 'clear_inventory_on_scope_change': True
-    })
-    assert changed.status_code == 200
-    assert changed.json()['cleared_inventory_count'] == 1
-    assert changed.json()['last_synced_at'] is None
-    assert not client.get('/api/agents').json()
-    assert client.post('/api/connections/' + created['id'] + '/discover').status_code == 200
-    assert client.delete('/api/connections/' + created['id']).status_code == 409
-    removed = client.delete('/api/connections/' + created['id'] + '?remove_inventory=true')
-    assert removed.status_code == 200
-    assert removed.json()['removed_inventory_count'] == 1
-    assert client.get('/api/connections').json() == []
-    assert client.get('/api/agents').json() == []
-    assert client.delete('/api/connections/' + created['id']).status_code == 404
+
+    monkeypatch.setattr(
+        connectors, 'discover',
+        lambda connection, azure_credentials=None: [
+            connectors.DiscoveredAgent(
+                'agent-one', 'Agent One', 'AWS Bedrock AgentCore'
+            )
+        ],
+    )
+
+    url = '/api/connections/' + created['id']
+    assert client.post(url + '/discover').status_code == 200
+
+    with connection() as db:
+        before = [
+            tuple(row) for row in db.execute(
+                """SELECT * FROM discovered_agents
+                   WHERE connection_id=?""",
+                (created['id'],),
+            )
+        ]
+
+    changed = {
+        'label': 'AWS West',
+        'env_prefix': 'AC_AWS',
+        'scope': {'region': 'us-west-2'},
+    }
+
+    assert client.patch(url, json=changed).status_code == 409
+    assert client.patch(url, json={
+        **changed,
+        'clear_inventory_on_scope_change': True,
+    }).status_code == 409
+
+    assert client.delete(url).status_code == 409
+    assert client.delete(
+        url + '?remove_inventory=true'
+    ).status_code == 409
+
+    with connection() as db:
+        after = [
+            tuple(row) for row in db.execute(
+                """SELECT * FROM discovered_agents
+                   WHERE connection_id=?""",
+                (created['id'],),
+            )
+        ]
+
+    assert after == before
+    assert len(after) == 1
+
+    # The connection target must also remain unchanged.
+    assert client.get('/api/connections').json()[0]['scope'] == {
+        'region': 'us-east-1'
+    }
+
 
 
 def test_frontend_assets_cache_busted(client):
@@ -286,3 +326,146 @@ def test_f01_duplicate_discovery_preserves_inventory(client, monkeypatch):
         ]
 
     assert after == before
+
+
+def test_f01_scope_change_cannot_delete_discovered_history(
+    client, monkeypatch
+):
+    from game.db import connection
+
+    created = client.post('/api/connections', json={
+        'provider': 'aws_agentcore',
+        'label': 'F01 AWS East',
+        'env_prefix': 'F01_AWS',
+        'scope': {'region': 'us-east-1'},
+    })
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    monkeypatch.setattr(
+        connectors, 'discover',
+        lambda configured, azure_credentials=None: [
+            connectors.DiscoveredAgent(
+                'agent-123', 'Historical Agent',
+                'AWS Bedrock AgentCore'
+            )
+        ],
+    )
+
+    discovered = client.post(
+        f'/api/connections/{connection_id}/discover'
+    )
+    assert discovered.status_code == 200, discovered.text
+
+    with connection() as db:
+        original = [
+            tuple(r) for r in db.execute(
+                """SELECT id, external_id, name
+                   FROM discovered_agents
+                   WHERE connection_id=?""",
+                (connection_id,),
+            )
+        ]
+
+    # Even explicit clearing must not silently erase history.
+    changed = client.patch(
+        f'/api/connections/{connection_id}',
+        json={
+            'label': 'F01 AWS West',
+            'env_prefix': 'F01_AWS',
+            'scope': {'region': 'us-west-2'},
+            'clear_inventory_on_scope_change': True,
+        },
+    )
+
+    assert changed.status_code == 409
+
+    with connection() as db:
+        remaining = [
+            tuple(r) for r in db.execute(
+                """SELECT id, external_id, name
+                   FROM discovered_agents
+                   WHERE connection_id=?""",
+                (connection_id,),
+            )
+        ]
+
+    assert remaining == original
+
+
+def test_f01_connection_removal_preserves_discovered_history(
+    client, monkeypatch
+):
+    from game.db import connection
+
+    created = client.post('/api/connections', json={
+        'provider': 'aws_agentcore',
+        'label': 'F01 AWS',
+        'env_prefix': 'F01_AWS',
+        'scope': {'region': 'us-east-1'},
+    })
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    monkeypatch.setattr(
+        connectors, 'discover',
+        lambda configured, azure_credentials=None: [
+            connectors.DiscoveredAgent(
+                'agent-456', 'Protected Agent',
+                'AWS Bedrock AgentCore'
+            )
+        ],
+    )
+
+    assert client.post(
+        f'/api/connections/{connection_id}/discover'
+    ).status_code == 200
+
+    with connection() as db:
+        original = db.execute(
+            """SELECT id FROM discovered_agents
+               WHERE connection_id=?""",
+            (connection_id,),
+        ).fetchone()['id']
+
+    # Explicit inventory deletion is not sufficient authorization
+    # to destroy historical identity records.
+    removed = client.delete(
+        f'/api/connections/{connection_id}?remove_inventory=true'
+    )
+
+    assert removed.status_code == 409
+
+    with connection() as db:
+        remaining = db.execute(
+            """SELECT id FROM discovered_agents
+               WHERE connection_id=?""",
+            (connection_id,),
+        ).fetchone()
+
+        assert remaining is not None
+        assert remaining['id'] == original
+
+        assert db.execute(
+            """SELECT COUNT(*) FROM provider_connections
+               WHERE id=?""",
+            (connection_id,),
+        ).fetchone()[0] == 1
+
+
+def test_f01_empty_connection_can_be_removed(client):
+    created = client.post('/api/connections', json={
+        'provider': 'aws_agentcore',
+        'label': 'F01 Empty Connection',
+        'env_prefix': 'F01_AWS',
+        'scope': {'region': 'us-east-1'},
+    })
+
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    removed = client.delete(
+        f'/api/connections/{connection_id}'
+    )
+
+    assert removed.status_code == 200, removed.text
