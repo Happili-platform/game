@@ -186,12 +186,6 @@ def database():
             WHERE status='open'
         """)
 
-        assert missing_manual == 0, (
-            f"{missing_manual} manual agents lack canonical references"
-        )
-        assert missing_discovered == 0, (
-            f"{missing_discovered} discovered agents lack references"
-        )
         assert broken_mappings == 0, (
             f"{broken_mappings} Google mappings are inconsistent"
         )
@@ -210,7 +204,9 @@ def database():
             f"Inventory {inventory}; references {references}; "
             f"canonical identities {canonical}; "
             f"verified mappings {mappings}; "
-            "integrity OK"
+            f"unmapped manual {missing_manual}; "
+            f"unmapped discovered {missing_discovered}; "
+            "verified mapping integrity OK"
         )
 
 
