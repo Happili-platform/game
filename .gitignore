@@ -60,3 +60,6 @@ htmlcov/
 # Terraform state (if introduced)
 *.tfstate
 *.tfstate.*
+
+# F01 local migration staging
+.migration-staging/
