@@ -23,6 +23,7 @@ def discovery_identity_preflight(
     agents: list,
     *,
     authenticated_source_verified: bool = False,
+    verified_project_number: str | None = None,
 ) -> IdentityPreflight:
     """Inspect discovery identity eligibility without database changes.
 
@@ -78,18 +79,29 @@ def discovery_identity_preflight(
     project = scope.get("project_id", "")
     location = scope.get("location", "")
 
-    expected_prefix = (
-        f"projects/{project}/locations/{location}/reasoningEngines/"
+    allowed_projects = {project}
+    if (
+        isinstance(verified_project_number, str)
+        and re.fullmatch(r"[1-9][0-9]*", verified_project_number)
+    ):
+        allowed_projects.add(verified_project_number)
+
+    resource_pattern = re.compile(
+        r"projects/([^/]+)/locations/([^/]+)/"
+        r"reasoningEngines/([A-Za-z0-9_-]+)"
     )
 
     for agent in agents:
         external_id = agent.external_id
-        if not isinstance(external_id, str) or not (
-            external_id.startswith(expected_prefix)
-            and re.fullmatch(
-                r"[A-Za-z0-9_-]+",
-                external_id[len(expected_prefix):],
-            )
+        match = (
+            resource_pattern.fullmatch(external_id)
+            if isinstance(external_id, str)
+            else None
+        )
+        if not (
+            match
+            and match.group(1) in allowed_projects
+            and match.group(2) == location
         ):
             return IdentityPreflight(
                 False, provider, scope_key,

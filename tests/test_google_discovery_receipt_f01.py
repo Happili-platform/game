@@ -197,3 +197,148 @@ def test_non_google_provider_cannot_issue_google_receipt():
         match="not enabled",
     ):
         connectors.discover_google_with_provenance(source)
+
+
+def test_verified_numeric_google_project_alias(monkeypatch):
+    fake_google_auth(monkeypatch)
+
+    import urllib.request
+
+    numeric_resource = (
+        "projects/268096427189/locations/us-central1/"
+        "reasoningEngines/112461622701719552"
+    )
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        url = request.full_url
+        calls.append(url)
+        assert request.get_header("Authorization") == (
+            "Bearer test-only-token"
+        )
+
+        if "cloudresourcemanager.googleapis.com" in url:
+            payload = {
+                "projectId": "sample-project",
+                "name": "projects/268096427189",
+            }
+        else:
+            payload = {
+                "reasoningEngines": [
+                    {
+                        "name": numeric_resource,
+                        "displayName": "GAMe F01 Validation Agent",
+                    }
+                ]
+            }
+        return io.BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen", fake_urlopen
+    )
+
+    source = configured()
+    agents, receipt = connectors.discover_google_with_provenance(
+        source
+    )
+
+    assert len(agents) == 1
+    assert agents[0].external_id == numeric_resource
+    assert receipt.verified_project_number == "268096427189"
+    assert verify_discovery_receipt(
+        source, agents, receipt
+    ).eligible
+    assert len(calls) == 2
+
+
+def test_unrelated_numeric_project_is_rejected(monkeypatch):
+    fake_google_auth(monkeypatch)
+
+    import urllib.request
+
+    def fake_urlopen(request, timeout):
+        if "cloudresourcemanager.googleapis.com" in request.full_url:
+            payload = {
+                "projectId": "sample-project",
+                "name": "projects/268096427189",
+            }
+        else:
+            payload = {
+                "reasoningEngines": [{
+                    "name": (
+                        "projects/999999999999/locations/us-central1/"
+                        "reasoningEngines/12345"
+                    ),
+                }]
+            }
+        return io.BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen", fake_urlopen
+    )
+
+    with pytest.raises(
+        connectors.DiscoveryError,
+        match="project identity mismatch",
+    ):
+        connectors.discover_google_with_provenance(configured())
+
+
+def test_numeric_project_wrong_location_rejected(monkeypatch):
+    fake_google_auth(monkeypatch)
+
+    import urllib.request
+
+    def fake_urlopen(request, timeout):
+        assert "cloudresourcemanager" not in request.full_url
+        return io.BytesIO(json.dumps({
+            "reasoningEngines": [{
+                "name": (
+                    "projects/268096427189/locations/europe-west1/"
+                    "reasoningEngines/12345"
+                )
+            }]
+        }).encode())
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen", fake_urlopen
+    )
+
+    with pytest.raises(
+        connectors.DiscoveryError,
+        match="different location",
+    ):
+        connectors.discover_google_with_provenance(configured())
+
+
+def test_project_identity_lookup_mismatch_rejected(monkeypatch):
+    fake_google_auth(monkeypatch)
+
+    import urllib.request
+
+    def fake_urlopen(request, timeout):
+        if "cloudresourcemanager.googleapis.com" in request.full_url:
+            payload = {
+                "projectId": "other-project",
+                "name": "projects/268096427189",
+            }
+        else:
+            payload = {
+                "reasoningEngines": [{
+                    "name": (
+                        "projects/268096427189/locations/us-central1/"
+                        "reasoningEngines/12345"
+                    )
+                }]
+            }
+        return io.BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr(
+        urllib.request, "urlopen", fake_urlopen
+    )
+
+    with pytest.raises(
+        connectors.DiscoveryError,
+        match="does not match configured scope",
+    ):
+        connectors.discover_google_with_provenance(configured())

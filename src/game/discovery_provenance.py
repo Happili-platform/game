@@ -42,6 +42,7 @@ class DiscoveryReceipt:
     batch_fingerprint: str
     agent_count: int
     _issuer: object
+    verified_project_number: str | None = None
 
     def __post_init__(self):
         if self._issuer is not _RECEIPT_ISSUER:
@@ -53,6 +54,8 @@ class DiscoveryReceipt:
 def _issue_connector_receipt(
     connection: dict,
     agents: list,
+    *,
+    verified_project_number: str | None = None,
 ) -> DiscoveryReceipt:
     """Internal issuance interface for future trusted connectors.
 
@@ -84,6 +87,7 @@ def _issue_connector_receipt(
         batch_fingerprint=_fingerprint(agents),
         agent_count=len(agents),
         _issuer=_RECEIPT_ISSUER,
+        verified_project_number=verified_project_number,
     )
 
 
@@ -117,6 +121,7 @@ def verify_discovery_receipt(
         connection,
         agents,
         authenticated_source_verified=True,
+        verified_project_number=receipt.verified_project_number,
     )
 
     if not result.eligible:

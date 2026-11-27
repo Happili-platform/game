@@ -85,36 +85,104 @@ def database():
     path = Path.home() / ".local/share/game/game.db"
     assert path.is_file(), f"Missing database: {path}"
 
-    uri = path.resolve().as_uri() + "?mode=ro"
-    with sqlite3.connect(uri, uri=True) as db:
+    with sqlite3.connect(
+        path.resolve().as_uri() + "?mode=ro",
+        uri=True,
+    ) as db:
+        db.row_factory = sqlite3.Row
+
         assert db.execute(
             "PRAGMA integrity_check"
-        ).fetchone()[0] == "ok"
+        ).fetchone()[0] == "ok", "SQLite integrity failed"
 
         assert not db.execute(
             "PRAGMA foreign_key_check"
-        ).fetchall()
+        ).fetchall(), "Foreign-key violations found"
 
-        expected = {
-            "discovered_agents": 6,
-            "canonical_agents": 6,
-            "agent_legacy_references": 6,
-            "agent_identity_mappings": 0,
-            "agent_identity_conflicts": 0,
-        }
+        def count(query):
+            return db.execute(query).fetchone()[0]
 
-        actual = {
-            table: db.execute(
-                f"SELECT COUNT(*) FROM {table}"
-            ).fetchone()[0]
-            for table in expected
-        }
+        inventory = count("""
+            SELECT
+                (SELECT COUNT(*) FROM agents) +
+                (SELECT COUNT(*) FROM discovered_agents)
+        """)
 
-        assert actual == expected, (
-            f"Expected {expected}; actual {actual}"
+        references = count(
+            "SELECT COUNT(*) FROM agent_legacy_references"
         )
 
-    return "Integrity OK; identities 6; legacy refs 6"
+        missing_manual = count("""
+            SELECT COUNT(*) FROM agents a
+            WHERE NOT EXISTS (
+                SELECT 1 FROM agent_legacy_references r
+                WHERE r.tenant_id=a.tenant_id
+                  AND r.source_table='agents'
+                  AND r.legacy_agent_id=a.id
+            )
+        """)
+
+        missing_discovered = count("""
+            SELECT COUNT(*) FROM discovered_agents a
+            WHERE NOT EXISTS (
+                SELECT 1 FROM agent_legacy_references r
+                WHERE r.tenant_id=a.tenant_id
+                  AND r.source_table='discovered_agents'
+                  AND r.legacy_agent_id=a.id
+            )
+        """)
+
+        broken_mappings = count("""
+            SELECT COUNT(*)
+            FROM agent_identity_mappings m
+            LEFT JOIN discovered_agents a
+              ON a.tenant_id=m.tenant_id
+             AND a.connection_id=m.connection_id
+             AND a.external_id=m.external_id
+            LEFT JOIN agent_legacy_references r
+              ON r.tenant_id=a.tenant_id
+             AND r.source_table='discovered_agents'
+             AND r.legacy_agent_id=a.id
+            WHERE m.provider='google_agent_engine'
+              AND (
+                  m.verification_status!='verified'
+                  OR a.id IS NULL
+                  OR r.canonical_agent_id IS NULL
+                  OR r.canonical_agent_id!=m.canonical_agent_id
+              )
+        """)
+
+        open_conflicts = count("""
+            SELECT COUNT(*) FROM agent_identity_conflicts
+            WHERE status='open'
+        """)
+
+        assert missing_manual == 0, (
+            f"{missing_manual} manual agents lack canonical references"
+        )
+        assert missing_discovered == 0, (
+            f"{missing_discovered} discovered agents lack references"
+        )
+        assert broken_mappings == 0, (
+            f"{broken_mappings} Google mappings are inconsistent"
+        )
+        assert open_conflicts == 0, (
+            f"{open_conflicts} unresolved identity conflicts"
+        )
+
+        canonical = count(
+            "SELECT COUNT(*) FROM canonical_agents"
+        )
+        mappings = count(
+            "SELECT COUNT(*) FROM agent_identity_mappings"
+        )
+
+        return (
+            f"Inventory {inventory}; references {references}; "
+            f"canonical identities {canonical}; "
+            f"verified mappings {mappings}; "
+            "integrity OK"
+        )
 
 
 def backups():
@@ -129,6 +197,8 @@ def backups():
 
 
 def regression():
+    import re
+
     env = os.environ.copy()
     env.pop("GAME_DB_PATH", None)
     env["PYTHONPATH"] = "src:."
@@ -137,10 +207,19 @@ def regression():
         sys.executable, "-m", "pytest", "-q",
         env=env,
     )
-    assert "247 passed" in output, (
-        f"Unexpected test result: {output[-500:]}"
+
+    match = re.search(r"(\d+) passed\b", output)
+    if not match:
+        raise RuntimeError(
+            "No successful pytest summary: " + output[-500:]
+        )
+
+    passed = int(match.group(1))
+    assert passed >= 251, (
+        f"Regression suite unexpectedly reduced to {passed} tests"
     )
-    return "247 tests passed"
+
+    return f"{passed} tests passed"
 
 
 def source_checks():
@@ -168,7 +247,7 @@ checks = [
     ("Application health", health),
     ("Active F01 database", database),
     ("Recovery files", backups),
-    ("247-test regression suite", regression),
+    ("Regression suite", regression),
     ("Source checks", source_checks),
     ("Git working tree", git_changes),
 ]
