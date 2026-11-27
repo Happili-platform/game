@@ -85,6 +85,34 @@ def test_all_three_providers_encrypted_and_decrypted_after_restart(paths, monkey
         calls[config['provider']] = kwargs
         return [connectors.DiscoveredAgent(f"id-{config['provider']}", config['provider'], 'Test')]
     monkeypatch.setattr(connectors, 'discover', fake_discover)
+
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+    from game.discovery_provenance import _issue_connector_receipt
+
+    def verified_google(config, google_credentials=None):
+        calls['google_agent_engine'] = {
+            'google_credentials': google_credentials
+        }
+        resource = (
+            'projects/game-lab-123/locations/'
+            'us-central1/reasoningEngines/12345'
+        )
+        agents = [
+            connectors.DiscoveredAgent(
+                resource, 'Google Agent', 'Google Agent Engine'
+            )
+        ]
+        return agents, _issue_connector_receipt(config, agents)
+
+    monkeypatch.setattr(
+        connectors, 'discover_google_with_provenance',
+        verified_google,
+    )
+
+    with connection() as identity_db:
+        initialize_identity_schema(identity_db)
+
     with TestClient(app) as restarted:
         assert len(restarted.get('/api/connections').json()) == 3
         for provider, id_ in ids.items():

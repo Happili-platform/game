@@ -67,6 +67,37 @@ def test_provider_ui_secrets_encrypted_and_support_discovery(client, monkeypatch
         seen.append(kwargs)
         return [connectors.DiscoveredAgent('x1','Sample agent','Test Provider')]
     monkeypatch.setattr(connectors,'discover',fake_discover)
+
+    if provider == 'google_agent_engine':
+        from game.db import connection
+        from game.identity import initialize_identity_schema
+        from game.discovery_provenance import _issue_connector_receipt
+
+        with connection() as db:
+            initialize_identity_schema(db)
+
+        def verified_google(config, google_credentials=None):
+            seen.append({
+                'google_credentials': google_credentials
+            })
+            agents = [
+                connectors.DiscoveredAgent(
+                    'projects/game-test-2026/locations/'
+                    'us-central1/reasoningEngines/12345',
+                    'Sample agent',
+                    'Google Agent Engine',
+                )
+            ]
+            return agents, _issue_connector_receipt(
+                config, agents
+            )
+
+        monkeypatch.setattr(
+            connectors,
+            'discover_google_with_provenance',
+            verified_google,
+        )
+
     tested=client.post(uri+'/test')
     assert tested.status_code==200
     assert tested.json()['visible_agents']==1
@@ -74,6 +105,11 @@ def test_provider_ui_secrets_encrypted_and_support_discovery(client, monkeypatch
     assert client.post(uri+'/discover').status_code==200
     assert len(client.get('/api/agents').json())==1
     assert creds_key in seen[0]
+    if provider == 'google_agent_engine':
+        assert creds_key in seen[-1]
+        assert seen[-1][creds_key]['client_email'].endswith(
+            '.gserviceaccount.com'
+        )
     assert client.delete(uri+'/credentials').status_code==200
     assert client.get('/api/connections').json()[0]['credential_source'] != 'encrypted'
     assert client.post(uri+'/test').status_code==200

@@ -810,6 +810,71 @@ def _discover_with_connection(configured: dict) -> list[connectors.DiscoveredAge
     return connectors.discover(configured)
 
 
+
+def _discover_verified_google_with_connection(configured: dict):
+    """Run authenticated Google discovery and return its source receipt.
+
+    Preserve the existing encrypted-credential handling.
+    """
+    if configured["provider"] != "google_agent_engine":
+        raise connectors.DiscoveryError(
+            "Verified discovery is not enabled for this provider"
+        )
+
+    if configured.get("auth_mode") != "legacy":
+        return connectors.discover_google_with_provenance(configured)
+
+    if os.getenv("GAME_AUTH_MODE", "local") == "oidc":
+        raise connectors.DiscoveryError(
+            "Legacy credential mode is disabled for multi-tenant API hosting"
+        )
+
+    with connection() as db:
+        stored = _saved_row(
+            db, configured["id"], configured["tenant_id"]
+        )
+
+    if stored:
+        if (
+            stored["expires_at"]
+            and datetime.fromisoformat(
+                stored["expires_at"].replace("Z", "+00:00")
+            ) <= utc_now()
+        ):
+            raise connectors.DiscoveryError(
+                "Saved temporary credentials have expired; "
+                "update the connection credentials"
+            )
+
+        try:
+            credentials = vault.decrypt(
+                configured["id"],
+                configured["provider"],
+                stored["encrypted_json"],
+            )
+        except vault.VaultError as exc:
+            raise connectors.DiscoveryError(str(exc)) from None
+
+        return connectors.discover_google_with_provenance(
+            configured,
+            google_credentials=credentials,
+        )
+
+    return connectors.discover_google_with_provenance(configured)
+
+
+def _f01_same_discovery_target(before, after):
+    """Reject provider configuration changes during remote discovery."""
+    return (
+        before["provider"] == after["provider"]
+        and before["env_prefix"] == after["env_prefix"]
+        and before["auth_mode"] == after["auth_mode"]
+        and json.loads(before["scope_json"])
+            == json.loads(after["scope_json"])
+        and json.loads(before["auth_config_json"])
+            == json.loads(after["auth_config_json"])
+    )
+
 class AzureSessionCredentials(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
     tenant_id: str = Field(pattern=r"^[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
@@ -1137,10 +1202,57 @@ def sync_connection(connection_id: str, request: Request):
         raise HTTPException(409, 'Private registry uses POST /api/connections/{id}/ingest')
     if configured["credential_source"] in ("encrypted", "vault_unavailable"):
         _require_local_credentials_request(request)
+
+    with connection() as db:
+        initial_credentials = _saved_row(
+            db, connection_id, actor.tenant_id
+        )
+        google_credentials_snapshot = (
+            tuple(initial_credentials)
+            if initial_credentials is not None else None
+        )
+
     # Remote discovery completes BEFORE the DB transaction: partial fetch failures do not
     # cause partial inventory writes. A successful empty response does not remove old records.
+    # F01: Google requires an authenticated connector-issued receipt.
+    # Other providers retain their existing inventory-only behavior.
+    from .identity import (
+        validate_discovery_batch,
+        IdentityConflict,
+        IdentityUnverified,
+    )
+
+    google_verified = configured["provider"] == "google_agent_engine"
+
+    if google_verified:
+        # No DDL inside the inventory transaction.
+        # Startup migration will be enabled only after migration review.
+        with connection() as db:
+            ready = db.execute("""
+                SELECT COUNT(*) FROM sqlite_master
+                WHERE type='table' AND name IN (
+                    'canonical_agents',
+                    'agent_legacy_references',
+                    'agent_identity_mappings'
+                )
+            """).fetchone()[0]
+
+        if ready != 3:
+            raise HTTPException(
+                503,
+                "Canonical identity schema is not initialized. "
+                "Complete the controlled F01 migration first."
+            )
+
     try:
-        agents = _discover_with_connection(configured)
+        receipt = None
+        if google_verified:
+            agents, receipt = (
+                _discover_verified_google_with_connection(configured)
+            )
+        else:
+            agents = _discover_with_connection(configured)
+
         from .identity import validate_discovery_batch, IdentityConflict
         try:
             validate_discovery_batch(agents)
@@ -1162,6 +1274,85 @@ def sync_connection(connection_id: str, request: Request):
             db.execute("UPDATE provider_connections SET last_error=? WHERE id=? AND tenant_id=?", ("Provider integration failed; inspect server logs", connection_id, actor.tenant_id))
         raise HTTPException(status_code=502, detail="Provider integration failed; check credentials and access") from exc
     synced = iso(utc_now())
+
+    if google_verified:
+        from .identity_persistence import (
+            persist_verified_discovery_batch,
+        )
+
+        try:
+            with connection() as db:
+                current = db.execute("""
+                    SELECT * FROM provider_connections
+                    WHERE id=? AND tenant_id=?
+                """, (connection_id, actor.tenant_id)).fetchone()
+
+                if (
+                    current is None
+                    or not _f01_same_discovery_target(row, current)
+                ):
+                    raise IdentityConflict(
+                        "Provider connection changed during discovery"
+                    )
+
+                # Reject credential replacement during remote discovery.
+                # Do not log or return encrypted credential material.
+                original_credentials = _saved_row(
+                    db, connection_id, actor.tenant_id
+                )
+
+                # For a legacy connection, the connector may have used
+                # an encrypted credential record. Ensure the same
+                # record was present at the start of discovery.
+                #
+                # The initial snapshot is added in the next replacement.
+                if (
+                    google_credentials_snapshot
+                    != (
+                        tuple(original_credentials)
+                        if original_credentials is not None else None
+                    )
+                ):
+                    raise IdentityConflict(
+                        "Provider credentials changed during discovery"
+                    )
+
+                associated = persist_verified_discovery_batch(
+                    db,
+                    tenant_id=actor.tenant_id,
+                    connection_id=connection_id,
+                    agents=agents,
+                    receipt=receipt,
+                    evidence_reference=(
+                        "google:authenticated-agent-engine-discovery"
+                    ),
+                )
+
+                db.execute("""
+                    UPDATE provider_connections
+                    SET last_synced_at=?, last_error=NULL
+                    WHERE id=? AND tenant_id=?
+                """, (synced, connection_id, actor.tenant_id))
+
+                _audit(
+                    db, actor, "connection.discover", connection_id
+                )
+
+        except (IdentityConflict, IdentityUnverified) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        return {
+            "connection_id": connection_id,
+            "discovered": len(agents),
+            "synced_at": synced,
+            "canonical_associated": len(associated),
+            "notice": (
+                "Verified Google Agent Engine inventory and canonical "
+                "identity associations. No runtime or billing imported."
+            ),
+        }
+
+    # Existing inventory-only behavior for all other providers.
     with connection() as db:
         for item in agents:
             db.execute("""INSERT INTO discovered_agents (
