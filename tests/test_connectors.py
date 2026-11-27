@@ -890,3 +890,153 @@ def test_f01_foundry_discovery_remains_inventory_only(
         assert db.execute(
             'SELECT COUNT(*) FROM agent_identity_mappings'
         ).fetchone()[0] == 0
+
+
+def test_f01_google_missing_schema_fails_before_provider_call(
+    client, monkeypatch
+):
+    from game import main as module
+
+    cid = _f01_google_connection(client, 'F01 No Schema')
+
+    def forbidden_discovery(configured):
+        raise AssertionError(
+            "Provider discovery must not run without F01 schema"
+        )
+
+    monkeypatch.setattr(
+        module,
+        '_discover_verified_google_with_connection',
+        forbidden_discovery,
+    )
+
+    result = client.post(
+        f'/api/connections/{cid}/discover'
+    )
+
+    assert result.status_code == 503, result.text
+
+    from game.db import connection
+    with connection() as db:
+        assert db.execute(
+            'SELECT COUNT(*) FROM discovered_agents'
+        ).fetchone()[0] == 0
+
+
+def test_f01_google_rejects_stale_connection_configuration(
+    client, monkeypatch
+):
+    import json
+
+    from game import main as module
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+    from game.discovery_provenance import _issue_connector_receipt
+
+    cid = _f01_google_connection(client, 'F01 Stale Target')
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+    agent = _f01_google_agent('123')
+
+    def change_target_during_discovery(configured):
+        receipt = _issue_connector_receipt(
+            configured, [agent]
+        )
+
+        # Simulate another administrator changing the target
+        # while remote discovery is in progress.
+        with connection() as db:
+            db.execute("""
+                UPDATE provider_connections
+                SET scope_json=?
+                WHERE id=?
+            """, (
+                json.dumps({
+                    'project_id': 'other-project',
+                    'location': 'us-central1',
+                }),
+                cid,
+            ))
+
+        return [agent], receipt
+
+    monkeypatch.setattr(
+        module,
+        '_discover_verified_google_with_connection',
+        change_target_during_discovery,
+    )
+
+    response = client.post(
+        f'/api/connections/{cid}/discover'
+    )
+
+    assert response.status_code == 409, response.text
+
+    with connection() as db:
+        for table in (
+            'discovered_agents',
+            'canonical_agents',
+            'agent_legacy_references',
+            'agent_identity_mappings',
+        ):
+            assert db.execute(
+                f'SELECT COUNT(*) FROM {table}'
+            ).fetchone()[0] == 0
+
+
+def test_f01_google_audit_failure_rolls_back_everything(
+    client, monkeypatch
+):
+    from game import main as module
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+
+    cid = _f01_google_connection(client, 'F01 Audit Rollback')
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+    _f01_mock_google_discovery(
+        monkeypatch, [_f01_google_agent('123')]
+    )
+
+    with connection() as db:
+        audit_before = db.execute(
+            'SELECT COUNT(*) FROM audit_events'
+        ).fetchone()[0]
+
+    def fail_audit(db, actor, operation, resource_id):
+        if operation == 'connection.discover':
+            raise RuntimeError('simulated audit failure')
+
+    monkeypatch.setattr(module, '_audit', fail_audit)
+
+    with pytest.raises(
+        RuntimeError, match='simulated audit failure'
+    ):
+        client.post(f'/api/connections/{cid}/discover')
+
+    with connection() as db:
+        for table in (
+            'discovered_agents',
+            'canonical_agents',
+            'agent_legacy_references',
+            'agent_identity_mappings',
+        ):
+            assert db.execute(
+                f'SELECT COUNT(*) FROM {table}'
+            ).fetchone()[0] == 0
+
+        assert db.execute(
+            'SELECT COUNT(*) FROM audit_events'
+        ).fetchone()[0] == audit_before
+
+        row = db.execute("""
+            SELECT last_synced_at
+            FROM provider_connections
+            WHERE id=?
+        """, (cid,)).fetchone()
+
+        assert row['last_synced_at'] is None

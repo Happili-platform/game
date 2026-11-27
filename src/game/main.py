@@ -1282,6 +1282,17 @@ def sync_connection(connection_id: str, request: Request):
 
         try:
             with connection() as db:
+                # Start the enclosing transaction BEFORE identity
+                # persistence creates or releases any savepoints.
+                #
+                # BEGIN IMMEDIATE obtains the SQLite write reservation
+                # and keeps inventory, canonical identity, sync
+                # metadata, and audit within one transaction.
+                #
+                # The connection() context commits on success
+                # and rolls back the entire transaction on failure.
+                db.execute("BEGIN IMMEDIATE")
+
                 current = db.execute("""
                     SELECT * FROM provider_connections
                     WHERE id=? AND tenant_id=?
