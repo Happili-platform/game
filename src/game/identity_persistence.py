@@ -13,6 +13,7 @@ from .discovery_provenance import (
     verify_discovery_receipt,
 )
 from .identity import IdentityConflict
+from .identity_scope import authoritative_scope
 from .identity_association import associate_discovered_batch
 
 
@@ -115,13 +116,32 @@ def persist_verified_discovery_batch(
             """, (tenant_id, legacy_id)).fetchone()
 
             if reference is None:
-                canonical_id = "game-agt-" + uuid4().hex
+                scope_key = authoritative_scope(configured)
 
-                db.execute("""
-                    INSERT INTO canonical_agents
-                    (id, tenant_id, created_at, updated_at)
-                    VALUES (?, ?, ?, ?)
-                """, (canonical_id, tenant_id, now, now))
+                mapped = db.execute("""
+                    SELECT canonical_agent_id, verification_status
+                    FROM agent_identity_mappings
+                    WHERE tenant_id=? AND provider=?
+                      AND scope_key=? AND external_id=?
+                """, (
+                    tenant_id, configured["provider"],
+                    scope_key, agent.external_id,
+                )).fetchone()
+
+                if mapped is not None:
+                    if mapped["verification_status"] != "verified":
+                        raise IdentityConflict(
+                            "Existing external identity is not verified"
+                        )
+                    canonical_id = mapped["canonical_agent_id"]
+                else:
+                    canonical_id = "game-agt-" + uuid4().hex
+
+                    db.execute("""
+                        INSERT INTO canonical_agents
+                        (id, tenant_id, created_at, updated_at)
+                        VALUES (?, ?, ?, ?)
+                    """, (canonical_id, tenant_id, now, now))
 
                 db.execute("""
                     INSERT INTO agent_legacy_references

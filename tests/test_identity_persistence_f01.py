@@ -117,22 +117,65 @@ def test_repeat_discovery_preserves_existing_ids(database):
         ).fetchone()[0] == "Updated name"
 
 
-def test_cross_connection_conflict_rolls_back_new_inventory(database):
+def test_cross_connection_reuses_verified_identity(database):
+    with connection() as db:
+        first = persist(db, "conn-a", [agent("1")])
+        original_id = next(iter(first.values()))
+
+        second = persist(
+            db, "conn-b", [agent("2"), agent("1")]
+        )
+
+        assert len(second) == 2
+        assert count(db, "discovered_agents") == 3
+        assert count(db, "canonical_agents") == 2
+        assert count(db, "agent_legacy_references") == 3
+        assert count(db, "agent_identity_mappings") == 2
+
+        shared = db.execute("""
+            SELECT r.canonical_agent_id
+            FROM agent_legacy_references r
+            JOIN discovered_agents a
+              ON a.id=r.legacy_agent_id
+             AND a.tenant_id=r.tenant_id
+            WHERE a.connection_id='conn-b'
+              AND a.external_id=?
+        """, (PREFIX + "1",)).fetchone()
+
+        assert shared["canonical_agent_id"] == original_id
+
+
+def test_conflicting_historical_reference_remains_protected(database):
     with connection() as db:
         persist(db, "conn-a", [agent("1")])
 
-        with pytest.raises(IdentityConflict):
-            persist(
-                db, "conn-b",
-                [agent("2"), agent("1")],
-            )
+        # Create pre-existing historical inventory under connection B
+        # and backfill it before verified reconciliation.
+        db.execute("""
+            INSERT INTO discovered_agents (
+                id, connection_id, external_id, name,
+                provider, discovered_at, discovery_last_seen,
+                created_at, tenant_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "ext-historical-b", "conn-b", PREFIX + "1",
+            "Historical B", "Google Agent Engine",
+            "2026-11-27", "2026-11-27",
+            "2026-11-27", "local-dev",
+        ))
 
-        # Both newly discovered rows, their canonical identities
-        # and any new mappings must be rolled back.
-        assert count(db, "discovered_agents") == 1
-        assert count(db, "canonical_agents") == 1
-        assert count(db, "agent_legacy_references") == 1
+        from game.identity import backfill_legacy_references
+        backfill_legacy_references(db)
+
+        with pytest.raises(IdentityConflict):
+            persist(db, "conn-b", [agent("1")])
+
+        # A failed batch must not replace the original reference.
+        assert count(db, "discovered_agents") == 2
+        assert count(db, "canonical_agents") == 2
+        assert count(db, "agent_legacy_references") == 2
         assert count(db, "agent_identity_mappings") == 1
+
 
 
 def test_invalid_receipt_writes_nothing(database):
@@ -154,3 +197,36 @@ def test_invalid_receipt_writes_nothing(database):
             "agent_identity_mappings",
         ):
             assert count(db, table) == 0
+
+
+def test_repeated_verified_discovery_refreshes_last_seen(
+    database, monkeypatch
+):
+    import game.identity as identity
+
+    with connection() as db:
+        persist(db, "conn-a", [agent("1")])
+
+        original = db.execute("""
+            SELECT first_seen, last_seen
+            FROM agent_identity_mappings
+        """).fetchone()
+
+        class Later:
+            @staticmethod
+            def now():
+                from datetime import datetime, timezone
+                return datetime(2027, 1, 1, tzinfo=timezone.utc)
+
+        monkeypatch.setattr(identity, "utc_now", Later.now)
+
+        persist(db, "conn-a", [agent("1")])
+
+        updated = db.execute("""
+            SELECT first_seen, last_seen
+            FROM agent_identity_mappings
+        """).fetchone()
+
+        assert updated["first_seen"] == original["first_seen"]
+        assert updated["last_seen"] > original["last_seen"]
+        assert count(db, "agent_identity_mappings") == 1

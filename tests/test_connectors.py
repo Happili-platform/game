@@ -750,7 +750,7 @@ def test_f01_google_api_creates_and_reuses_canonical_mapping(
         ).fetchone()[0] == 1
 
 
-def test_f01_google_api_conflict_rolls_back_inventory(
+def test_f01_google_api_reuses_verified_identity_across_connections(
     client, monkeypatch
 ):
     from game.db import connection
@@ -771,41 +771,50 @@ def test_f01_google_api_conflict_rolls_back_inventory(
     )
     assert first.status_code == 200, first.text
 
-    with connection() as db:
-        original_counts = {
-            table: db.execute(
-                f'SELECT COUNT(*) FROM {table}'
-            ).fetchone()[0]
-            for table in (
-                'discovered_agents',
-                'canonical_agents',
-                'agent_legacy_references',
-                'agent_identity_mappings',
-                'audit_events',
-            )
-        }
-
-    # Same authoritative external identity, but a new legacy
-    # agent would have a different canonical association.
-    conflict = client.post(
+    second = client.post(
         f'/api/connections/{second_cid}/discover'
     )
-    assert conflict.status_code == 409, conflict.text
+    assert second.status_code == 200, second.text
 
     with connection() as db:
-        after_counts = {
-            table: db.execute(
-                f'SELECT COUNT(*) FROM {table}'
-            ).fetchone()[0]
-            for table in original_counts
-        }
+        associations = db.execute("""
+            SELECT a.connection_id, r.canonical_agent_id
+            FROM discovered_agents a
+            JOIN agent_legacy_references r
+              ON r.legacy_agent_id=a.id
+             AND r.tenant_id=a.tenant_id
+             AND r.source_table='discovered_agents'
+            WHERE a.connection_id IN (?, ?)
+            ORDER BY a.connection_id
+        """, (first_cid, second_cid)).fetchall()
 
-        assert after_counts == original_counts
+        assert len(associations) == 2
+        assert {
+            row['connection_id'] for row in associations
+        } == {first_cid, second_cid}
 
-        assert db.execute("""
-            SELECT COUNT(*) FROM discovered_agents
-            WHERE connection_id=?
-        """, (second_cid,)).fetchone()[0] == 0
+        # Both inventory records refer to the same verified agent.
+        assert len({
+            row['canonical_agent_id']
+            for row in associations
+        }) == 1
+
+        assert db.execute(
+            "SELECT COUNT(*) FROM canonical_agents"
+        ).fetchone()[0] == 1
+
+        assert db.execute(
+            "SELECT COUNT(*) FROM agent_identity_mappings"
+        ).fetchone()[0] == 1
+
+        assert db.execute(
+            "SELECT COUNT(*) FROM agent_legacy_references"
+        ).fetchone()[0] == 2
+
+        assert db.execute(
+            "SELECT COUNT(*) FROM discovered_agents"
+        ).fetchone()[0] == 2
+
 
 
 def test_f01_google_api_rejects_wrong_connection_receipt(
@@ -1185,3 +1194,62 @@ def test_f01_google_rejects_credentials_added_during_discovery(
             SELECT COUNT(*) FROM provider_credentials
             WHERE connection_id=?
         """, (cid,)).fetchone()[0] == 1
+
+
+def test_f01_manual_agent_blocks_connection_removal(client):
+    created = client.post('/api/connections', json={
+        'provider': 'aws_agentcore',
+        'label': 'Manual Agent Protected Connection',
+        'env_prefix': 'F01_AWS',
+        'scope': {'region': 'us-east-1'},
+    })
+    assert created.status_code == 201, created.text
+    cid = created.json()['id']
+
+    agent = client.post('/api/agents', json={
+        'name': 'Manually Registered Agent',
+        'provider': 'aws_agentcore',
+        'connection_id': cid,
+    })
+    assert agent.status_code == 201, agent.text
+
+    removed = client.delete(f'/api/connections/{cid}')
+    assert removed.status_code == 409, removed.text
+
+    assert client.get(
+        f"/api/agents/{agent.json()['id']}"
+    ).status_code == 200
+
+
+def test_f01_manual_agent_blocks_connection_scope_change(client):
+    created = client.post('/api/connections', json={
+        'provider': 'aws_agentcore',
+        'label': 'Manual Agent Scope Protection',
+        'env_prefix': 'F01_AWS',
+        'scope': {'region': 'us-east-1'},
+    })
+    assert created.status_code == 201, created.text
+    cid = created.json()['id']
+
+    agent = client.post('/api/agents', json={
+        'name': 'Manually Registered Agent',
+        'provider': 'aws_agentcore',
+        'connection_id': cid,
+    })
+    assert agent.status_code == 201, agent.text
+
+    changed = client.patch(
+        f'/api/connections/{cid}',
+        json={
+            'label': 'Changed Connection',
+            'env_prefix': 'F01_AWS',
+            'scope': {'region': 'us-west-2'},
+            'auth_mode': 'legacy',
+            'auth_config': {},
+        },
+    )
+    assert changed.status_code == 409, changed.text
+
+    assert client.get(
+        f"/api/agents/{agent.json()['id']}"
+    ).status_code == 200

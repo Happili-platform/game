@@ -1102,7 +1102,12 @@ def test_connection(connection_id: str, request: Request):
 def _connection_history_counts(db, tenant_id, connection_id):
     """Count evidence that must survive connection changes."""
     counts = {}
-    for table in ("discovered_agents", "provider_inventory", "trust_tools"):
+    for table in (
+        "agents",
+        "discovered_agents",
+        "provider_inventory",
+        "trust_tools",
+    ):
         counts[table] = db.execute(
             f"SELECT COUNT(*) FROM {table} "
             "WHERE tenant_id=? AND connection_id=?",

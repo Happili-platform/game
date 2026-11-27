@@ -465,6 +465,15 @@ def bind_discovered_legacy_identity(
             raise IdentityConflict(
                 "External identity conflicts with an existing mapping"
             )
+        db.execute("""
+            UPDATE agent_identity_mappings
+            SET last_seen=?
+            WHERE tenant_id=? AND provider=?
+              AND scope_key=? AND external_id=?
+        """, (
+            iso(utc_now()), tenant_id, provider,
+            scope_key, external_id,
+        ))
         return canonical_id
 
     now = iso(utc_now())
