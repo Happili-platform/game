@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from game.identity import (
@@ -75,11 +76,11 @@ def prepare(source: Path, output: Path):
         # Read-only source; SQLite backup produces a consistent snapshot.
         source_uri = source.as_uri() + "?mode=ro"
 
-        with sqlite3.connect(source_uri, uri=True) as src:
-            with sqlite3.connect(output) as dst:
+        with closing(sqlite3.connect(source_uri, uri=True)) as src:
+            with closing(sqlite3.connect(output)) as dst:
                 src.backup(dst)
 
-        with sqlite3.connect(output) as db:
+        with closing(sqlite3.connect(output)) as db:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA foreign_keys=ON")
 
@@ -142,6 +143,46 @@ def prepare(source: Path, output: Path):
                 raise RuntimeError(
                     "Legacy identity reference count mismatch"
                 )
+
+        # Verify staged changes are checkpointed before single-file cutover.
+        # This check runs after the migration connection has closed.
+        with closing(sqlite3.connect(output)) as verified:
+            if verified.execute(
+                "PRAGMA integrity_check"
+            ).fetchone()[0] != "ok":
+                raise RuntimeError("Staged database integrity failed")
+
+            tables = {
+                row[0] for row in verified.execute(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type='table'"
+                )
+            }
+            if not set(IDENTITY).issubset(tables):
+                raise RuntimeError(
+                    "Staged database missing identity tables"
+                )
+
+            if verified.execute(
+                "PRAGMA foreign_key_check"
+            ).fetchall():
+                raise RuntimeError(
+                    "Staged database foreign-key validation failed"
+                )
+
+            # Ensure WAL pages are transferred into the main database.
+            checkpoint = verified.execute(
+                "PRAGMA wal_checkpoint(TRUNCATE)"
+            ).fetchone()
+            if checkpoint and checkpoint[0] != 0:
+                raise RuntimeError(
+                    "Staged SQLite WAL checkpoint was blocked"
+                )
+
+        if Path(str(output) + "-wal").exists():
+            raise RuntimeError(
+                "Staged WAL file still exists after checkpoint"
+            )
 
         return {
             "before": before_counts,

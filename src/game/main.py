@@ -33,7 +33,7 @@ from .local_network import permitted_local_request
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if os.getenv("GAME_AUTH_MODE", "password") == "password":
+    if os.getenv("GAME_AUTH_MODE", "password").strip().lower() == "password":
         require_existing_runtime_database()
     initialize()
     yield
