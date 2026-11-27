@@ -3,6 +3,7 @@
 
 import os
 import sqlite3
+import json
 import subprocess
 import sys
 import urllib.request
@@ -81,8 +82,36 @@ def health():
         return f"HTTP 200; version {payload.get('version')}"
 
 
+
+def configured_data_dir() -> Path:
+    """Resolve the host database directory from Docker Compose."""
+    config = json.loads(
+        run("docker", "compose", "config", "--format", "json")
+    )
+
+    mounts = [
+        volume
+        for volume in config["services"]["game"]["volumes"]
+        if volume.get("target") == "/app/data"
+        and volume.get("type") == "bind"
+    ]
+
+    if len(mounts) != 1:
+        raise RuntimeError(
+            "Expected exactly one /app/data bind mount"
+        )
+
+    directory = Path(mounts[0]["source"])
+    if not directory.is_dir():
+        raise RuntimeError(
+            "Configured GAMe data directory does not exist"
+        )
+
+    return directory
+
+
 def database():
-    path = Path.home() / ".local/share/game/game.db"
+    path = configured_data_dir() / "game.db"
     assert path.is_file(), f"Missing database: {path}"
 
     with sqlite3.connect(
@@ -186,7 +215,7 @@ def database():
 
 
 def backups():
-    directory = Path.home() / ".local/share/game"
+    directory = configured_data_dir()
     for filename in (
         "game-pre-f01-backup.db",
         "game-f01-ready.db",

@@ -63,3 +63,6 @@ htmlcov/
 
 # F01 local migration staging
 .migration-staging/
+
+# Optional local Google ADC configuration
+compose.google-adc.yaml
