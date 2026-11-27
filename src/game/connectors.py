@@ -199,7 +199,12 @@ def _azure(connection: dict, azure_credentials: dict[str, str] | None = None) ->
         credential.close()
 
 
-def _google(connection: dict, google_credentials: dict | None = None) -> list[DiscoveredAgent]:
+def _google(
+    connection: dict,
+    google_credentials: dict | None = None,
+    *,
+    include_receipt: bool = False,
+):
     """Google Agent Engine discovery with stage-specific sanitized errors.
 
     Uses the standard-library HTTPS transport to honor the same system proxy
@@ -297,8 +302,28 @@ def _google(connection: dict, google_credentials: dict | None = None) -> list[Di
                     str(item.get("description") or "")[:500],
                 ))
         marker = result.get("nextPageToken")
-        if not marker or marker == page_token:
-            return agents
+        if marker == page_token and marker:
+            raise DiscoveryError(
+                "Google discovery returned a repeated pagination token"
+            )
+        if not marker:
+            if not include_receipt:
+                return agents
+
+            # This point is reachable only after OAuth refresh and
+            # successful completion of all provider API pages.
+            from .discovery_provenance import _issue_connector_receipt
+            from .identity import IdentityError
+
+            try:
+                receipt = _issue_connector_receipt(connection, agents)
+            except IdentityError as exc:
+                raise DiscoveryError(
+                    "Google discovery identity verification failed"
+                ) from exc
+
+            return agents, receipt
+
         page_token = marker
     raise DiscoveryError("Google pagination limit reached; narrow the project scope")
 
@@ -376,6 +401,28 @@ def _aws(connection: dict, aws_credentials: dict[str, str] | None = None) -> lis
         raise DiscoveryError("AWS discovery failed; check credentials, IAM permissions and region") from exc
     finally:
         client.close()
+
+
+
+def discover_google_with_provenance(
+    connection: dict,
+    google_credentials: dict | None = None,
+):
+    """Return agents and an internally issued discovery receipt.
+
+    Unlike the ordinary discover() API, the receipt is issued
+    inside Google's authenticated, paginated discovery path.
+    No receipt is issued for incomplete or failed discovery.
+    """
+    if connection.get("provider") != "google_agent_engine":
+        raise DiscoveryError(
+            "Verified discovery is not enabled for this provider"
+        )
+    return _google(
+        connection,
+        google_credentials=google_credentials,
+        include_receipt=True,
+    )
 
 
 def discover(connection: dict, azure_credentials: dict[str, str] | None = None,
