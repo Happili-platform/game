@@ -6,5 +6,6 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def legacy_auth_mode_for_test(monkeypatch):
+    monkeypatch.setenv('GAME_TESTING', 'true')
     monkeypatch.setenv('GAME_AUTH_MODE','local')
     monkeypatch.setenv('GAME_ALLOW_INSECURE_LOCAL','true')

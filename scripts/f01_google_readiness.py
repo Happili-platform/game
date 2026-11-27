@@ -2,11 +2,36 @@
 """Read-only readiness checks for F01 Google discovery."""
 
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
 
-db_path = Path.home() / ".local/share/game/game.db"
+db_path = Path(
+    os.environ.get(
+        "GAME_DB_PATH",
+        str(Path.home() / ".local/share/game/game.db"),
+    )
+)
+
+
+def adc_available() -> bool:
+    """Verify ADC can obtain an OAuth token, without printing it."""
+    try:
+        import google.auth
+        from google.auth.transport.requests import Request
+
+        credentials, _ = google.auth.default(
+            scopes=[
+                "https://www.googleapis.com/auth/cloud-platform"
+            ]
+        )
+        credentials.refresh(Request())
+        return bool(credentials.token)
+    except Exception:
+        return False
+
+
 
 def report(status, description):
     print(f"[{status}] {description}")
@@ -74,6 +99,8 @@ with sqlite3.connect(uri, uri=True) as db:
         sys.exit(2)
 
     ready = 0
+    has_adc = adc_available()
+    print(f"Google ADC authentication available: {has_adc}")
 
     for conn in connections:
         print(f"\nConnection: {conn['label']}")
@@ -108,6 +135,7 @@ with sqlite3.connect(uri, uri=True) as db:
         if valid_scope and (
             conn["auth_mode"] != "legacy"
             or has_saved_credentials
+            or has_adc
         ):
             ready += 1
             report("PASS", "Connection configuration candidate")

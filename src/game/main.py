@@ -23,7 +23,7 @@ from .version import __version__
 from . import connectors, vault, local_accounts
 from .auth import require, require_resource, permits_resource, LOCAL_TENANT, current_principal
 from . import rbac
-from .db import connection, initialize, iso, utc_now
+from .db import connection, initialize, iso, utc_now, require_existing_runtime_database
 from .runtime import router as runtime_router
 from .finops import router as finops_router
 from .trust_graph import router as trust_graph_router
@@ -33,6 +33,8 @@ from .local_network import permitted_local_request
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if os.getenv("GAME_AUTH_MODE", "password") == "password":
+        require_existing_runtime_database()
     initialize()
     yield
 
