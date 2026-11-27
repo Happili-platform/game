@@ -1040,3 +1040,148 @@ def test_f01_google_audit_failure_rolls_back_everything(
         """, (cid,)).fetchone()
 
         assert row['last_synced_at'] is None
+
+
+def test_f01_google_rejects_credentials_rotated_during_discovery(
+    client, monkeypatch
+):
+    from game import main as module
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+    from game.discovery_provenance import _issue_connector_receipt
+
+    cid = _f01_google_connection(client, 'F01 Credential Rotation')
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+        # Synthetic ciphertext is used only to exercise the
+        # credential snapshot check. No decryption is attempted.
+        db.execute("""
+            INSERT INTO provider_credentials (
+                connection_id, encrypted_json,
+                saved_at, rotated_at, tenant_id
+            ) VALUES (?, ?, ?, ?, ?)
+        """, (
+            cid, 'synthetic-original-ciphertext',
+            '2026-11-27T10:00:00Z',
+            '2026-11-27T10:00:00Z',
+            'local-dev',
+        ))
+
+    discovered = [_f01_google_agent('123')]
+
+    def rotate_during_discovery(configured):
+        receipt = _issue_connector_receipt(
+            configured, discovered
+        )
+
+        with connection() as db:
+            db.execute("""
+                UPDATE provider_credentials
+                SET encrypted_json=?, rotated_at=?
+                WHERE connection_id=? AND tenant_id=?
+            """, (
+                'synthetic-rotated-ciphertext',
+                '2026-11-27T11:00:00Z',
+                cid, 'local-dev',
+            ))
+
+        return discovered, receipt
+
+    monkeypatch.setattr(
+        module,
+        '_discover_verified_google_with_connection',
+        rotate_during_discovery,
+    )
+
+    response = client.post(
+        f'/api/connections/{cid}/discover'
+    )
+
+    assert response.status_code == 409, response.text
+    assert 'credentials changed' in response.json()['detail']
+
+    with connection() as db:
+        for table in (
+            'discovered_agents',
+            'canonical_agents',
+            'agent_legacy_references',
+            'agent_identity_mappings',
+        ):
+            assert db.execute(
+                f'SELECT COUNT(*) FROM {table}'
+            ).fetchone()[0] == 0
+
+        assert db.execute("""
+            SELECT encrypted_json FROM provider_credentials
+            WHERE connection_id=?
+        """, (cid,)).fetchone()[0] == (
+            'synthetic-rotated-ciphertext'
+        )
+
+
+def test_f01_google_rejects_credentials_added_during_discovery(
+    client, monkeypatch
+):
+    from game import main as module
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+    from game.discovery_provenance import _issue_connector_receipt
+
+    cid = _f01_google_connection(client, 'F01 Credentials Added')
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+    discovered = [_f01_google_agent('456')]
+
+    def add_credentials_during_discovery(configured):
+        receipt = _issue_connector_receipt(
+            configured, discovered
+        )
+
+        with connection() as db:
+            db.execute("""
+                INSERT INTO provider_credentials (
+                    connection_id, encrypted_json,
+                    saved_at, rotated_at, tenant_id
+                ) VALUES (?, ?, ?, ?, ?)
+            """, (
+                cid, 'synthetic-new-ciphertext',
+                '2026-11-27T11:00:00Z',
+                '2026-11-27T11:00:00Z',
+                'local-dev',
+            ))
+
+        return discovered, receipt
+
+    monkeypatch.setattr(
+        module,
+        '_discover_verified_google_with_connection',
+        add_credentials_during_discovery,
+    )
+
+    response = client.post(
+        f'/api/connections/{cid}/discover'
+    )
+
+    assert response.status_code == 409, response.text
+
+    with connection() as db:
+        for table in (
+            'discovered_agents',
+            'canonical_agents',
+            'agent_legacy_references',
+            'agent_identity_mappings',
+        ):
+            assert db.execute(
+                f'SELECT COUNT(*) FROM {table}'
+            ).fetchone()[0] == 0
+
+        # Credential replacement is a separate committed operation.
+        # Discovery rollback must not undo that legitimate change.
+        assert db.execute("""
+            SELECT COUNT(*) FROM provider_credentials
+            WHERE connection_id=?
+        """, (cid,)).fetchone()[0] == 1
