@@ -2,13 +2,20 @@ services:
   game:
     build: .
     ports:
-      - "127.0.0.1:8000:8000" # Localhost-only alpha evaluation; not internet-facing
+      - "127.0.0.1:8000:8000"
     environment:
       GAME_DB_PATH: /app/data/game.db
       GAME_DEMO_DATA: "false"
       GAME_AUTH_MODE: "password"
+      GAME_TESTING: "false"
       GAME_VAULT_KEY_PATH: /app/vault/master.key
+      GAME_LOCAL_DOCKER_GATEWAY: "${GAME_LOCAL_DOCKER_GATEWAY:-172.18.0.1}"
     volumes:
-      - ./data:/app/data
-      - ${HOME}/.config/game:/app/vault:ro
+      - type: bind
+        source: ${GAME_DATA_DIR:?Set GAME_DATA_DIR in .env}
+        target: /app/data
+      - type: bind
+        source: ${GAME_VAULT_DIR:?Set GAME_VAULT_DIR in .env}
+        target: /app/vault
+        read_only: true
     restart: unless-stopped

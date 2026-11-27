@@ -64,13 +64,42 @@ def test_discover_idempotent_and_inventory_provenance(client, monkeypatch):
             'Microsoft Foundry' if connection['provider'] == 'microsoft_foundry' else 'Google Agent Engine',
             provider_status='READY')]
     monkeypatch.setattr(connectors, 'discover', fake_discover)
+
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+    from game.discovery_provenance import _issue_connector_receipt
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+    google_id = (
+        'projects/my-sample-project/locations/'
+        'us-central1/reasoningEngines/12345'
+    )
+
+    def verified_google(configured, google_credentials=None):
+        agents = [
+            connectors.DiscoveredAgent(
+                google_id, 'Review Agent', 'Google Agent Engine',
+                provider_status='READY',
+            )
+        ]
+        return agents, _issue_connector_receipt(configured, agents)
+
+    monkeypatch.setattr(
+        connectors, 'discover_google_with_provenance',
+        verified_google,
+    )
     for _ in range(2):
         assert client.post('/api/connections/' + first['id'] + '/discover').json()['discovered'] == 1
     assert client.post('/api/connections/' + second['id'] + '/discover').json()['discovered'] == 1
     agents = client.get('/api/agents').json()
     assert len(agents) == 2
     assert all(a['source'] == 'discovered' and a['last_seen'] is None for a in agents)
-    assert all(a['discovery_last_seen'] and a['external_id'] == 'provider-id-1' for a in agents)
+    assert all(a['discovery_last_seen'] for a in agents)
+    assert {a['external_id'] for a in agents} == {
+        'provider-id-1', google_id
+    }
     assert agents[0]['id'] != agents[1]['id']
     assert all('STALE_AGENT' not in {f['code'] for f in a['findings']} for a in agents)
     assert all(a['environment'] == 'unknown' for a in agents)
@@ -122,33 +151,73 @@ def test_edit_connection_without_secrets_and_provider_is_immutable(client):
     }).status_code == 404
 
 
-def test_scope_change_requires_clear_inventory_and_remove_is_explicit(client, monkeypatch):
+def test_scope_change_requires_clear_inventory_and_remove_is_explicit(
+    client, monkeypatch
+):
+    from game.db import connection
+
     created = client.post('/api/connections', json={
-        'provider': 'aws_agentcore', 'label': 'AWS', 'env_prefix': 'AC_AWS', 'scope': {'region': 'us-east-1'}
+        'provider': 'aws_agentcore',
+        'label': 'AWS',
+        'env_prefix': 'AC_AWS',
+        'scope': {'region': 'us-east-1'},
     }).json()
-    monkeypatch.setattr(connectors, 'discover', lambda connection, azure_credentials=None: [
-        connectors.DiscoveredAgent('agent-one', 'Agent One', 'AWS Bedrock AgentCore')])
-    assert client.post('/api/connections/' + created['id'] + '/discover').status_code == 200
-    assert len(client.get('/api/agents').json()) == 1
-    altered = {'label': 'AWS West', 'env_prefix': 'AC_AWS', 'scope': {'region':'us-west-2'}}
-    blocked = client.patch('/api/connections/' + created['id'], json=altered)
-    assert blocked.status_code == 409
-    assert len(client.get('/api/agents').json()) == 1
-    changed = client.patch('/api/connections/' + created['id'], json={
-        **altered, 'clear_inventory_on_scope_change': True
-    })
-    assert changed.status_code == 200
-    assert changed.json()['cleared_inventory_count'] == 1
-    assert changed.json()['last_synced_at'] is None
-    assert not client.get('/api/agents').json()
-    assert client.post('/api/connections/' + created['id'] + '/discover').status_code == 200
-    assert client.delete('/api/connections/' + created['id']).status_code == 409
-    removed = client.delete('/api/connections/' + created['id'] + '?remove_inventory=true')
-    assert removed.status_code == 200
-    assert removed.json()['removed_inventory_count'] == 1
-    assert client.get('/api/connections').json() == []
-    assert client.get('/api/agents').json() == []
-    assert client.delete('/api/connections/' + created['id']).status_code == 404
+
+    monkeypatch.setattr(
+        connectors, 'discover',
+        lambda connection, azure_credentials=None: [
+            connectors.DiscoveredAgent(
+                'agent-one', 'Agent One', 'AWS Bedrock AgentCore'
+            )
+        ],
+    )
+
+    url = '/api/connections/' + created['id']
+    assert client.post(url + '/discover').status_code == 200
+
+    with connection() as db:
+        before = [
+            tuple(row) for row in db.execute(
+                """SELECT * FROM discovered_agents
+                   WHERE connection_id=?""",
+                (created['id'],),
+            )
+        ]
+
+    changed = {
+        'label': 'AWS West',
+        'env_prefix': 'AC_AWS',
+        'scope': {'region': 'us-west-2'},
+    }
+
+    assert client.patch(url, json=changed).status_code == 409
+    assert client.patch(url, json={
+        **changed,
+        'clear_inventory_on_scope_change': True,
+    }).status_code == 409
+
+    assert client.delete(url).status_code == 409
+    assert client.delete(
+        url + '?remove_inventory=true'
+    ).status_code == 409
+
+    with connection() as db:
+        after = [
+            tuple(row) for row in db.execute(
+                """SELECT * FROM discovered_agents
+                   WHERE connection_id=?""",
+                (created['id'],),
+            )
+        ]
+
+    assert after == before
+    assert len(after) == 1
+
+    # The connection target must also remain unchanged.
+    assert client.get('/api/connections').json()[0]['scope'] == {
+        'region': 'us-east-1'
+    }
+
 
 
 def test_frontend_assets_cache_busted(client):
@@ -215,3 +284,972 @@ def test_build_version_matches_file_and_health(client):
     from pathlib import Path
     assert Path(__file__).resolve().parents[1].joinpath('src/VERSION').read_text().strip() == __version__
     assert client.get('/api/health').json()['version'] == __version__
+
+
+def test_f01_duplicate_discovery_preserves_inventory(client, monkeypatch):
+    from game.db import connection
+
+    created = client.post('/api/connections', json={
+        'provider': 'microsoft_foundry',
+        'label': 'F01 Foundry',
+        'env_prefix': 'F01_FOUNDRY',
+        'scope': {
+            'project_endpoint':
+                'https://example.services.ai.azure.com/api/projects/test'
+        },
+    })
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    monkeypatch.setattr(
+        connectors, 'discover',
+        lambda configured, azure_credentials=None: [
+            connectors.DiscoveredAgent(
+                'provider-id-1', 'Original', 'Microsoft Foundry'
+            )
+        ],
+    )
+
+    first = client.post(
+        f'/api/connections/{connection_id}/discover'
+    )
+    assert first.status_code == 200, first.text
+
+    with connection() as db:
+        before = [
+            tuple(row) for row in db.execute(
+                """SELECT id, external_id, name, discovery_last_seen
+                   FROM discovered_agents
+                   WHERE connection_id=?
+                   ORDER BY id""",
+                (connection_id,),
+            )
+        ]
+
+    monkeypatch.setattr(
+        connectors, 'discover',
+        lambda configured, azure_credentials=None: [
+            connectors.DiscoveredAgent(
+                'provider-id-1', 'Changed', 'Microsoft Foundry'
+            ),
+            connectors.DiscoveredAgent(
+                'provider-id-1', 'Duplicate', 'Microsoft Foundry'
+            ),
+        ],
+    )
+
+    rejected = client.post(
+        f'/api/connections/{connection_id}/discover'
+    )
+    assert rejected.status_code == 409, rejected.text
+
+    with connection() as db:
+        after = [
+            tuple(row) for row in db.execute(
+                """SELECT id, external_id, name, discovery_last_seen
+                   FROM discovered_agents
+                   WHERE connection_id=?
+                   ORDER BY id""",
+                (connection_id,),
+            )
+        ]
+
+    assert after == before
+
+
+def test_f01_scope_change_cannot_delete_discovered_history(
+    client, monkeypatch
+):
+    from game.db import connection
+
+    created = client.post('/api/connections', json={
+        'provider': 'aws_agentcore',
+        'label': 'F01 AWS East',
+        'env_prefix': 'F01_AWS',
+        'scope': {'region': 'us-east-1'},
+    })
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    monkeypatch.setattr(
+        connectors, 'discover',
+        lambda configured, azure_credentials=None: [
+            connectors.DiscoveredAgent(
+                'agent-123', 'Historical Agent',
+                'AWS Bedrock AgentCore'
+            )
+        ],
+    )
+
+    discovered = client.post(
+        f'/api/connections/{connection_id}/discover'
+    )
+    assert discovered.status_code == 200, discovered.text
+
+    with connection() as db:
+        original = [
+            tuple(r) for r in db.execute(
+                """SELECT id, external_id, name
+                   FROM discovered_agents
+                   WHERE connection_id=?""",
+                (connection_id,),
+            )
+        ]
+
+    # Even explicit clearing must not silently erase history.
+    changed = client.patch(
+        f'/api/connections/{connection_id}',
+        json={
+            'label': 'F01 AWS West',
+            'env_prefix': 'F01_AWS',
+            'scope': {'region': 'us-west-2'},
+            'clear_inventory_on_scope_change': True,
+        },
+    )
+
+    assert changed.status_code == 409
+
+    with connection() as db:
+        remaining = [
+            tuple(r) for r in db.execute(
+                """SELECT id, external_id, name
+                   FROM discovered_agents
+                   WHERE connection_id=?""",
+                (connection_id,),
+            )
+        ]
+
+    assert remaining == original
+
+
+def test_f01_connection_removal_preserves_discovered_history(
+    client, monkeypatch
+):
+    from game.db import connection
+
+    created = client.post('/api/connections', json={
+        'provider': 'aws_agentcore',
+        'label': 'F01 AWS',
+        'env_prefix': 'F01_AWS',
+        'scope': {'region': 'us-east-1'},
+    })
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    monkeypatch.setattr(
+        connectors, 'discover',
+        lambda configured, azure_credentials=None: [
+            connectors.DiscoveredAgent(
+                'agent-456', 'Protected Agent',
+                'AWS Bedrock AgentCore'
+            )
+        ],
+    )
+
+    assert client.post(
+        f'/api/connections/{connection_id}/discover'
+    ).status_code == 200
+
+    with connection() as db:
+        original = db.execute(
+            """SELECT id FROM discovered_agents
+               WHERE connection_id=?""",
+            (connection_id,),
+        ).fetchone()['id']
+
+    # Explicit inventory deletion is not sufficient authorization
+    # to destroy historical identity records.
+    removed = client.delete(
+        f'/api/connections/{connection_id}?remove_inventory=true'
+    )
+
+    assert removed.status_code == 409
+
+    with connection() as db:
+        remaining = db.execute(
+            """SELECT id FROM discovered_agents
+               WHERE connection_id=?""",
+            (connection_id,),
+        ).fetchone()
+
+        assert remaining is not None
+        assert remaining['id'] == original
+
+        assert db.execute(
+            """SELECT COUNT(*) FROM provider_connections
+               WHERE id=?""",
+            (connection_id,),
+        ).fetchone()[0] == 1
+
+
+def test_f01_empty_connection_can_be_removed(client):
+    created = client.post('/api/connections', json={
+        'provider': 'aws_agentcore',
+        'label': 'F01 Empty Connection',
+        'env_prefix': 'F01_AWS',
+        'scope': {'region': 'us-east-1'},
+    })
+
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    removed = client.delete(
+        f'/api/connections/{connection_id}'
+    )
+
+    assert removed.status_code == 200, removed.text
+
+
+@pytest.mark.parametrize(
+    "resource_type",
+    ["provider_inventory", "trust_tools", "trust_links"],
+)
+def test_f01_history_blocks_connection_removal(
+    client, resource_type
+):
+    from game.db import connection
+
+    created = client.post('/api/connections', json={
+        'provider': 'github_inventory',
+        'label': 'F01 Evidence',
+        'env_prefix': 'F01_GITHUB',
+        'scope': {'organization': 'Happili-platform'},
+    })
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    _seed_f01_evidence(connection_id, resource_type)
+
+    removed = client.delete(
+        f'/api/connections/{connection_id}?remove_inventory=true'
+    )
+    assert removed.status_code == 409, removed.text
+
+    with connection() as db:
+        assert _f01_evidence_exists(
+            db, connection_id, resource_type
+        )
+
+
+@pytest.mark.parametrize(
+    "resource_type",
+    ["provider_inventory", "trust_tools", "trust_links"],
+)
+def test_f01_history_blocks_connection_scope_change(
+    client, resource_type
+):
+    from game.db import connection
+
+    created = client.post('/api/connections', json={
+        'provider': 'github_inventory',
+        'label': 'F01 Evidence',
+        'env_prefix': 'F01_GITHUB',
+        'scope': {'organization': 'Happili-platform'},
+    })
+    assert created.status_code == 201, created.text
+    connection_id = created.json()['id']
+
+    _seed_f01_evidence(connection_id, resource_type)
+
+    changed = client.patch(
+        f'/api/connections/{connection_id}',
+        json={
+            'label': 'Changed',
+            'env_prefix': 'F01_GITHUB',
+            'scope': {'organization': 'Other-platform'},
+            'clear_inventory_on_scope_change': True,
+        },
+    )
+    assert changed.status_code == 409, changed.text
+
+    with connection() as db:
+        assert _f01_evidence_exists(
+            db, connection_id, resource_type
+        )
+
+    current = client.get('/api/connections').json()
+    assert current[0]['scope'] == {
+        'organization': 'Happili-platform'
+    }
+
+
+def _seed_f01_evidence(connection_id, resource_type):
+    from game.db import connection
+
+    with connection() as db:
+        now = "2026-11-25T00:00:00Z"
+
+        if resource_type == "provider_inventory":
+            db.execute("""
+                INSERT INTO provider_inventory
+                (id, tenant_id, connection_id, kind,
+                 external_id, name, first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "f01-inventory", "local-dev", connection_id,
+                "repository", "repo-123", "Example", now, now,
+            ))
+            return
+
+        db.execute("""
+            INSERT INTO trust_tools
+            (id, tenant_id, connection_id, namespace,
+             external_id, name, first_seen, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "f01-tool", "local-dev", connection_id,
+            "github", "read", "Read", now, now,
+        ))
+
+        if resource_type == "trust_links":
+            db.execute("""
+                INSERT INTO trust_links
+                (id, tenant_id, agent_id, tool_id,
+                 evidence_type, evidence_reference,
+                 first_seen, last_seen)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "f01-link", "local-dev", "agt-example",
+                "f01-tool", "declared_configuration",
+                "test:evidence", now, now,
+            ))
+
+
+def _f01_evidence_exists(db, connection_id, resource_type):
+    if resource_type == "provider_inventory":
+        return db.execute(
+            "SELECT COUNT(*) FROM provider_inventory "
+            "WHERE connection_id=?",
+            (connection_id,),
+        ).fetchone()[0] == 1
+
+    tool_exists = db.execute(
+        "SELECT COUNT(*) FROM trust_tools WHERE connection_id=?",
+        (connection_id,),
+    ).fetchone()[0] == 1
+
+    if resource_type == "trust_tools":
+        return tool_exists
+
+    return tool_exists and db.execute(
+        "SELECT COUNT(*) FROM trust_links "
+        "WHERE id='f01-link' AND tool_id='f01-tool'"
+    ).fetchone()[0] == 1
+
+
+# F01.13.6: Verified Google API integration.
+# These tests use simulated connector responses; no Google calls occur.
+
+def _f01_google_connection(client, label):
+    created = client.post('/api/connections', json={
+        'provider': 'google_agent_engine',
+        'label': label,
+        'env_prefix': 'F01_GOOGLE',
+        'scope': {
+            'project_id': 'sample-project',
+            'location': 'us-central1',
+        },
+    })
+    assert created.status_code == 201, created.text
+    return created.json()['id']
+
+
+def _f01_google_agent(value):
+    return connectors.DiscoveredAgent(
+        'projects/sample-project/locations/'
+        f'us-central1/reasoningEngines/{value}',
+        f'Google Agent {value}',
+        'Google Agent Engine',
+    )
+
+
+def _f01_mock_google_discovery(monkeypatch, agents, receipt_connection=None):
+    from game import main as module
+    from game.discovery_provenance import _issue_connector_receipt
+
+    # Keep legacy path isolated from real provider credentials/network.
+    monkeypatch.setattr(
+        module,
+        '_discover_with_connection',
+        lambda configured: list(agents),
+    )
+
+    def verified(configured, google_credentials=None):
+        source = dict(configured)
+        if receipt_connection is not None:
+            source['id'] = receipt_connection
+
+        return (
+            list(agents),
+            _issue_connector_receipt(source, agents),
+        )
+
+    monkeypatch.setattr(
+        connectors,
+        'discover_google_with_provenance',
+        verified,
+    )
+
+
+def test_f01_google_api_creates_and_reuses_canonical_mapping(
+    client, monkeypatch
+):
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+
+    cid = _f01_google_connection(client, 'F01 Google A')
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+    _f01_mock_google_discovery(
+        monkeypatch, [_f01_google_agent('123')]
+    )
+
+    url = f'/api/connections/{cid}/discover'
+
+    first = client.post(url)
+    assert first.status_code == 200, first.text
+
+    with connection() as db:
+        original = db.execute("""
+            SELECT a.id, r.canonical_agent_id
+            FROM discovered_agents a
+            JOIN agent_legacy_references r
+              ON r.legacy_agent_id=a.id
+             AND r.tenant_id=a.tenant_id
+             AND r.source_table='discovered_agents'
+            WHERE a.connection_id=?
+        """, (cid,)).fetchone()
+
+        assert original is not None
+        original_identity = tuple(original)
+
+    second = client.post(url)
+    assert second.status_code == 200, second.text
+
+    with connection() as db:
+        after = db.execute("""
+            SELECT a.id, r.canonical_agent_id
+            FROM discovered_agents a
+            JOIN agent_legacy_references r
+              ON r.legacy_agent_id=a.id
+             AND r.tenant_id=a.tenant_id
+             AND r.source_table='discovered_agents'
+            WHERE a.connection_id=?
+        """, (cid,)).fetchone()
+
+        assert tuple(after) == original_identity
+
+        assert db.execute(
+            'SELECT COUNT(*) FROM agent_identity_mappings'
+        ).fetchone()[0] == 1
+
+        assert db.execute(
+            'SELECT COUNT(*) FROM canonical_agents'
+        ).fetchone()[0] == 1
+
+
+def test_f01_google_api_reuses_verified_identity_across_connections(
+    client, monkeypatch
+):
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+
+    first_cid = _f01_google_connection(client, 'F01 Source A')
+    second_cid = _f01_google_connection(client, 'F01 Source B')
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+    _f01_mock_google_discovery(
+        monkeypatch, [_f01_google_agent('123')]
+    )
+
+    first = client.post(
+        f'/api/connections/{first_cid}/discover'
+    )
+    assert first.status_code == 200, first.text
+
+    second = client.post(
+        f'/api/connections/{second_cid}/discover'
+    )
+    assert second.status_code == 200, second.text
+
+    with connection() as db:
+        associations = db.execute("""
+            SELECT a.connection_id, r.canonical_agent_id
+            FROM discovered_agents a
+            JOIN agent_legacy_references r
+              ON r.legacy_agent_id=a.id
+             AND r.tenant_id=a.tenant_id
+             AND r.source_table='discovered_agents'
+            WHERE a.connection_id IN (?, ?)
+            ORDER BY a.connection_id
+        """, (first_cid, second_cid)).fetchall()
+
+        assert len(associations) == 2
+        assert {
+            row['connection_id'] for row in associations
+        } == {first_cid, second_cid}
+
+        # Both inventory records refer to the same verified agent.
+        assert len({
+            row['canonical_agent_id']
+            for row in associations
+        }) == 1
+
+        assert db.execute(
+            "SELECT COUNT(*) FROM canonical_agents"
+        ).fetchone()[0] == 1
+
+        assert db.execute(
+            "SELECT COUNT(*) FROM agent_identity_mappings"
+        ).fetchone()[0] == 1
+
+        assert db.execute(
+            "SELECT COUNT(*) FROM agent_legacy_references"
+        ).fetchone()[0] == 2
+
+        assert db.execute(
+            "SELECT COUNT(*) FROM discovered_agents"
+        ).fetchone()[0] == 2
+
+
+
+def test_f01_google_api_rejects_wrong_connection_receipt(
+    client, monkeypatch
+):
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+
+    cid = _f01_google_connection(client, 'F01 Receipt Test')
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+    _f01_mock_google_discovery(
+        monkeypatch,
+        [_f01_google_agent('123')],
+        receipt_connection='different-connection',
+    )
+
+    response = client.post(
+        f'/api/connections/{cid}/discover'
+    )
+    assert response.status_code == 409, response.text
+
+    with connection() as db:
+        for table in (
+            'discovered_agents',
+            'canonical_agents',
+            'agent_legacy_references',
+            'agent_identity_mappings',
+        ):
+            assert db.execute(
+                f'SELECT COUNT(*) FROM {table}'
+            ).fetchone()[0] == 0
+
+
+def test_f01_foundry_discovery_remains_inventory_only(
+    client, monkeypatch
+):
+    from game import main as module
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+
+    created = client.post('/api/connections', json={
+        'provider': 'microsoft_foundry',
+        'label': 'F01 Foundry',
+        'env_prefix': 'F01_FOUNDRY',
+        'scope': {
+            'project_endpoint':
+                'https://example.services.ai.azure.com/api/projects/test'
+        },
+    })
+    assert created.status_code == 201, created.text
+    cid = created.json()['id']
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+    monkeypatch.setattr(
+        module,
+        '_discover_with_connection',
+        lambda configured: [
+            connectors.DiscoveredAgent(
+                'foundry-agent-123',
+                'Existing Foundry Agent',
+                'Microsoft Foundry',
+            )
+        ],
+    )
+
+    result = client.post(
+        f'/api/connections/{cid}/discover'
+    )
+    assert result.status_code == 200, result.text
+
+    with connection() as db:
+        assert db.execute("""
+            SELECT COUNT(*) FROM discovered_agents
+            WHERE connection_id=?
+        """, (cid,)).fetchone()[0] == 1
+
+        assert db.execute(
+            'SELECT COUNT(*) FROM agent_identity_mappings'
+        ).fetchone()[0] == 0
+
+
+def test_f01_google_missing_schema_fails_before_provider_call(
+    client, monkeypatch
+):
+    from game import main as module
+
+    cid = _f01_google_connection(client, 'F01 No Schema')
+
+    def forbidden_discovery(configured):
+        raise AssertionError(
+            "Provider discovery must not run without F01 schema"
+        )
+
+    monkeypatch.setattr(
+        module,
+        '_discover_verified_google_with_connection',
+        forbidden_discovery,
+    )
+
+    result = client.post(
+        f'/api/connections/{cid}/discover'
+    )
+
+    assert result.status_code == 503, result.text
+
+    from game.db import connection
+    with connection() as db:
+        assert db.execute(
+            'SELECT COUNT(*) FROM discovered_agents'
+        ).fetchone()[0] == 0
+
+
+def test_f01_google_rejects_stale_connection_configuration(
+    client, monkeypatch
+):
+    import json
+
+    from game import main as module
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+    from game.discovery_provenance import _issue_connector_receipt
+
+    cid = _f01_google_connection(client, 'F01 Stale Target')
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+    agent = _f01_google_agent('123')
+
+    def change_target_during_discovery(configured):
+        receipt = _issue_connector_receipt(
+            configured, [agent]
+        )
+
+        # Simulate another administrator changing the target
+        # while remote discovery is in progress.
+        with connection() as db:
+            db.execute("""
+                UPDATE provider_connections
+                SET scope_json=?
+                WHERE id=?
+            """, (
+                json.dumps({
+                    'project_id': 'other-project',
+                    'location': 'us-central1',
+                }),
+                cid,
+            ))
+
+        return [agent], receipt
+
+    monkeypatch.setattr(
+        module,
+        '_discover_verified_google_with_connection',
+        change_target_during_discovery,
+    )
+
+    response = client.post(
+        f'/api/connections/{cid}/discover'
+    )
+
+    assert response.status_code == 409, response.text
+
+    with connection() as db:
+        for table in (
+            'discovered_agents',
+            'canonical_agents',
+            'agent_legacy_references',
+            'agent_identity_mappings',
+        ):
+            assert db.execute(
+                f'SELECT COUNT(*) FROM {table}'
+            ).fetchone()[0] == 0
+
+
+def test_f01_google_audit_failure_rolls_back_everything(
+    client, monkeypatch
+):
+    from game import main as module
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+
+    cid = _f01_google_connection(client, 'F01 Audit Rollback')
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+    _f01_mock_google_discovery(
+        monkeypatch, [_f01_google_agent('123')]
+    )
+
+    with connection() as db:
+        audit_before = db.execute(
+            'SELECT COUNT(*) FROM audit_events'
+        ).fetchone()[0]
+
+    def fail_audit(db, actor, operation, resource_id):
+        if operation == 'connection.discover':
+            raise RuntimeError('simulated audit failure')
+
+    monkeypatch.setattr(module, '_audit', fail_audit)
+
+    with pytest.raises(
+        RuntimeError, match='simulated audit failure'
+    ):
+        client.post(f'/api/connections/{cid}/discover')
+
+    with connection() as db:
+        for table in (
+            'discovered_agents',
+            'canonical_agents',
+            'agent_legacy_references',
+            'agent_identity_mappings',
+        ):
+            assert db.execute(
+                f'SELECT COUNT(*) FROM {table}'
+            ).fetchone()[0] == 0
+
+        assert db.execute(
+            'SELECT COUNT(*) FROM audit_events'
+        ).fetchone()[0] == audit_before
+
+        row = db.execute("""
+            SELECT last_synced_at
+            FROM provider_connections
+            WHERE id=?
+        """, (cid,)).fetchone()
+
+        assert row['last_synced_at'] is None
+
+
+def test_f01_google_rejects_credentials_rotated_during_discovery(
+    client, monkeypatch
+):
+    from game import main as module
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+    from game.discovery_provenance import _issue_connector_receipt
+
+    cid = _f01_google_connection(client, 'F01 Credential Rotation')
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+        # Synthetic ciphertext is used only to exercise the
+        # credential snapshot check. No decryption is attempted.
+        db.execute("""
+            INSERT INTO provider_credentials (
+                connection_id, encrypted_json,
+                saved_at, rotated_at, tenant_id
+            ) VALUES (?, ?, ?, ?, ?)
+        """, (
+            cid, 'synthetic-original-ciphertext',
+            '2026-11-27T10:00:00Z',
+            '2026-11-27T10:00:00Z',
+            'local-dev',
+        ))
+
+    discovered = [_f01_google_agent('123')]
+
+    def rotate_during_discovery(configured):
+        receipt = _issue_connector_receipt(
+            configured, discovered
+        )
+
+        with connection() as db:
+            db.execute("""
+                UPDATE provider_credentials
+                SET encrypted_json=?, rotated_at=?
+                WHERE connection_id=? AND tenant_id=?
+            """, (
+                'synthetic-rotated-ciphertext',
+                '2026-11-27T11:00:00Z',
+                cid, 'local-dev',
+            ))
+
+        return discovered, receipt
+
+    monkeypatch.setattr(
+        module,
+        '_discover_verified_google_with_connection',
+        rotate_during_discovery,
+    )
+
+    response = client.post(
+        f'/api/connections/{cid}/discover'
+    )
+
+    assert response.status_code == 409, response.text
+    assert 'credentials changed' in response.json()['detail']
+
+    with connection() as db:
+        for table in (
+            'discovered_agents',
+            'canonical_agents',
+            'agent_legacy_references',
+            'agent_identity_mappings',
+        ):
+            assert db.execute(
+                f'SELECT COUNT(*) FROM {table}'
+            ).fetchone()[0] == 0
+
+        assert db.execute("""
+            SELECT encrypted_json FROM provider_credentials
+            WHERE connection_id=?
+        """, (cid,)).fetchone()[0] == (
+            'synthetic-rotated-ciphertext'
+        )
+
+
+def test_f01_google_rejects_credentials_added_during_discovery(
+    client, monkeypatch
+):
+    from game import main as module
+    from game.db import connection
+    from game.identity import initialize_identity_schema
+    from game.discovery_provenance import _issue_connector_receipt
+
+    cid = _f01_google_connection(client, 'F01 Credentials Added')
+
+    with connection() as db:
+        initialize_identity_schema(db)
+
+    discovered = [_f01_google_agent('456')]
+
+    def add_credentials_during_discovery(configured):
+        receipt = _issue_connector_receipt(
+            configured, discovered
+        )
+
+        with connection() as db:
+            db.execute("""
+                INSERT INTO provider_credentials (
+                    connection_id, encrypted_json,
+                    saved_at, rotated_at, tenant_id
+                ) VALUES (?, ?, ?, ?, ?)
+            """, (
+                cid, 'synthetic-new-ciphertext',
+                '2026-11-27T11:00:00Z',
+                '2026-11-27T11:00:00Z',
+                'local-dev',
+            ))
+
+        return discovered, receipt
+
+    monkeypatch.setattr(
+        module,
+        '_discover_verified_google_with_connection',
+        add_credentials_during_discovery,
+    )
+
+    response = client.post(
+        f'/api/connections/{cid}/discover'
+    )
+
+    assert response.status_code == 409, response.text
+
+    with connection() as db:
+        for table in (
+            'discovered_agents',
+            'canonical_agents',
+            'agent_legacy_references',
+            'agent_identity_mappings',
+        ):
+            assert db.execute(
+                f'SELECT COUNT(*) FROM {table}'
+            ).fetchone()[0] == 0
+
+        # Credential replacement is a separate committed operation.
+        # Discovery rollback must not undo that legitimate change.
+        assert db.execute("""
+            SELECT COUNT(*) FROM provider_credentials
+            WHERE connection_id=?
+        """, (cid,)).fetchone()[0] == 1
+
+
+def test_f01_manual_agent_blocks_connection_removal(client):
+    created = client.post('/api/connections', json={
+        'provider': 'aws_agentcore',
+        'label': 'Manual Agent Protected Connection',
+        'env_prefix': 'F01_AWS',
+        'scope': {'region': 'us-east-1'},
+    })
+    assert created.status_code == 201, created.text
+    cid = created.json()['id']
+
+    agent = client.post('/api/agents', json={
+        'name': 'Manually Registered Agent',
+        'provider': 'aws_agentcore',
+        'connection_id': cid,
+    })
+    assert agent.status_code == 201, agent.text
+
+    removed = client.delete(f'/api/connections/{cid}')
+    assert removed.status_code == 409, removed.text
+
+    assert client.get(
+        f"/api/agents/{agent.json()['id']}"
+    ).status_code == 200
+
+
+def test_f01_manual_agent_blocks_connection_scope_change(client):
+    created = client.post('/api/connections', json={
+        'provider': 'aws_agentcore',
+        'label': 'Manual Agent Scope Protection',
+        'env_prefix': 'F01_AWS',
+        'scope': {'region': 'us-east-1'},
+    })
+    assert created.status_code == 201, created.text
+    cid = created.json()['id']
+
+    agent = client.post('/api/agents', json={
+        'name': 'Manually Registered Agent',
+        'provider': 'aws_agentcore',
+        'connection_id': cid,
+    })
+    assert agent.status_code == 201, agent.text
+
+    changed = client.patch(
+        f'/api/connections/{cid}',
+        json={
+            'label': 'Changed Connection',
+            'env_prefix': 'F01_AWS',
+            'scope': {'region': 'us-west-2'},
+            'auth_mode': 'legacy',
+            'auth_config': {},
+        },
+    )
+    assert changed.status_code == 409, changed.text
+
+    assert client.get(
+        f"/api/agents/{agent.json()['id']}"
+    ).status_code == 200

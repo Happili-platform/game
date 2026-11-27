@@ -199,7 +199,66 @@ def _azure(connection: dict, azure_credentials: dict[str, str] | None = None) ->
         credential.close()
 
 
-def _google(connection: dict, google_credentials: dict | None = None) -> list[DiscoveredAgent]:
+def _verified_google_project_number(
+    project_id: str,
+    access_token: str,
+) -> str:
+    """Verify the project-ID/number alias using authenticated Google API."""
+    import json
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    url = (
+        "https://cloudresourcemanager.googleapis.com/v3/"
+        f"projects/{project_id}"
+    )
+    request = Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+        },
+    )
+
+    try:
+        with urlopen(request, timeout=20) as response:
+            payload = json.load(response)
+    except (HTTPError, URLError, TimeoutError, OSError,
+            ValueError, TypeError):
+        raise DiscoveryError(
+            "Google project-number verification failed"
+        ) from None
+
+    if not isinstance(payload, dict):
+        raise DiscoveryError(
+            "Google project identity response is invalid"
+        )
+
+    name = payload.get("name", "")
+    number = (
+        name.removeprefix("projects/")
+        if isinstance(name, str)
+        and name.startswith("projects/")
+        else ""
+    )
+
+    if (
+        payload.get("projectId") != project_id
+        or not re.fullmatch(r"[1-9][0-9]*", number)
+    ):
+        raise DiscoveryError(
+            "Google project identity does not match configured scope"
+        )
+
+    return number
+
+
+def _google(
+    connection: dict,
+    google_credentials: dict | None = None,
+    *,
+    include_receipt: bool = False,
+):
     """Google Agent Engine discovery with stage-specific sanitized errors.
 
     Uses the standard-library HTTPS transport to honor the same system proxy
@@ -297,8 +356,70 @@ def _google(connection: dict, google_credentials: dict | None = None) -> list[Di
                     str(item.get("description") or "")[:500],
                 ))
         marker = result.get("nextPageToken")
-        if not marker or marker == page_token:
-            return agents
+        if marker == page_token and marker:
+            raise DiscoveryError(
+                "Google discovery returned a repeated pagination token"
+            )
+        if not marker:
+            if not include_receipt:
+                return agents
+
+            # This point is reachable only after OAuth refresh and
+            # successful completion of all provider API pages.
+            from .discovery_provenance import _issue_connector_receipt
+            from .identity import IdentityError
+
+            verified_number = None
+            numeric_projects = set()
+
+            resource_pattern = re.compile(
+                r"projects/([^/]+)/locations/([^/]+)/"
+                r"reasoningEngines/([A-Za-z0-9_-]+)"
+            )
+
+            for agent in agents:
+                match = resource_pattern.fullmatch(agent.external_id)
+                if not match:
+                    raise DiscoveryError(
+                        "Google discovery returned an invalid resource"
+                    )
+
+                resource_project, resource_location, _ = match.groups()
+                if resource_location != location:
+                    raise DiscoveryError(
+                        "Google discovery returned a different location"
+                    )
+
+                if resource_project != scope["project_id"]:
+                    if not re.fullmatch(r"[1-9][0-9]*", resource_project):
+                        raise DiscoveryError(
+                            "Google discovery returned a different project"
+                        )
+                    numeric_projects.add(resource_project)
+
+            if numeric_projects:
+                verified_number = _verified_google_project_number(
+                    scope["project_id"],
+                    credentials.token,
+                )
+                if numeric_projects != {verified_number}:
+                    raise DiscoveryError(
+                        "Google discovery project identity mismatch"
+                    )
+
+            try:
+                receipt = _issue_connector_receipt(
+                    connection,
+                    agents,
+                    verified_project_number=verified_number,
+                )
+            except IdentityError as exc:
+                raise DiscoveryError(
+                    "Google discovery identity verification failed"
+                ) from exc
+
+            return agents, receipt
+
         page_token = marker
     raise DiscoveryError("Google pagination limit reached; narrow the project scope")
 
@@ -376,6 +497,28 @@ def _aws(connection: dict, aws_credentials: dict[str, str] | None = None) -> lis
         raise DiscoveryError("AWS discovery failed; check credentials, IAM permissions and region") from exc
     finally:
         client.close()
+
+
+
+def discover_google_with_provenance(
+    connection: dict,
+    google_credentials: dict | None = None,
+):
+    """Return agents and an internally issued discovery receipt.
+
+    Unlike the ordinary discover() API, the receipt is issued
+    inside Google's authenticated, paginated discovery path.
+    No receipt is issued for incomplete or failed discovery.
+    """
+    if connection.get("provider") != "google_agent_engine":
+        raise DiscoveryError(
+            "Verified discovery is not enabled for this provider"
+        )
+    return _google(
+        connection,
+        google_credentials=google_credentials,
+        include_receipt=True,
+    )
 
 
 def discover(connection: dict, azure_credentials: dict[str, str] | None = None,

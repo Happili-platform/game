@@ -12,7 +12,34 @@ from .policy_engine import DEFAULT_RULES
 
 
 def db_path() -> Path:
-    return Path(os.getenv("GAME_DB_PATH", "data/game.db"))
+    return Path(
+        os.getenv("GAME_DB_PATH", "data/game.db")
+    ).expanduser()
+
+
+
+def require_existing_runtime_database() -> Path:
+    """Fail closed before starting a password-authenticated server."""
+    configured = os.getenv("GAME_DB_PATH", "").strip()
+
+    if not configured:
+        raise RuntimeError(
+            "GAME_DB_PATH must be explicitly configured before "
+            "starting GAMe in password authentication mode"
+        )
+
+    path = db_path()
+
+    if not path.is_file():
+        if os.getenv("GAME_TESTING", "").lower() == "true":
+            return path
+
+        raise RuntimeError(
+            "Configured GAMe database does not exist; refusing "
+            "to create a new database"
+        )
+
+    return path
 
 
 def utc_now() -> datetime:

@@ -141,3 +141,47 @@ def test_collector_skips_sync_without_foundry(monkeypatch, capsys):
         '/api/runtime/azure-inventory-ready'
     )
     assert 'synchronization skipped' in capsys.readouterr().out
+
+
+def test_f01_collector_duplicate_batch_does_not_write(client, monkeypatch):
+    _connection()
+
+    monkeypatch.setattr(
+        main_module,
+        '_discover_with_connection',
+        lambda configured: [
+            SimpleNamespace(
+                external_id='duplicate-id',
+                name='First',
+                provider='Microsoft Foundry',
+                description='',
+                provider_status='active',
+            ),
+            SimpleNamespace(
+                external_id='duplicate-id',
+                name='Second',
+                provider='Microsoft Foundry',
+                description='',
+                provider_status='active',
+            ),
+        ],
+    )
+
+    rejected = client.post(
+        '/api/runtime/azure-inventory-sync',
+        headers={'X-GAME-Ingest-Token': TOKEN},
+    )
+
+    assert rejected.status_code == 409, rejected.text
+
+    with connection() as db:
+        count = db.execute(
+            "SELECT COUNT(*) FROM discovered_agents"
+        ).fetchone()[0]
+        assert count == 0
+
+        synced = db.execute(
+            """SELECT last_synced_at FROM provider_connections
+               WHERE id='conn-foundry'"""
+        ).fetchone()
+        assert synced['last_synced_at'] is None

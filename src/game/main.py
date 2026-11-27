@@ -23,15 +23,18 @@ from .version import __version__
 from . import connectors, vault, local_accounts
 from .auth import require, require_resource, permits_resource, LOCAL_TENANT, current_principal
 from . import rbac
-from .db import connection, initialize, iso, utc_now
+from .db import connection, initialize, iso, utc_now, require_existing_runtime_database
 from .runtime import router as runtime_router
 from .finops import router as finops_router
 from .trust_graph import router as trust_graph_router
 from . import provider_integrations
+from .local_network import permitted_local_request
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if os.getenv("GAME_AUTH_MODE", "password").strip().lower() == "password":
+        require_existing_runtime_database()
     initialize()
     yield
 
@@ -699,9 +702,14 @@ def role_catalog(request: Request):
 
 
 def _require_local_credentials_request(request: Request) -> None:
+    if os.getenv("GAME_AUTH_MODE", "password").lower() == "oidc":
+        raise HTTPException(
+            403,
+            "Local credential operations are disabled in OIDC mode",
+        )
     client_host = request.client.host if request.client else ''
     host = request.url.hostname or ''
-    if not (client_host in {'127.0.0.1', '::1'} and host in {'127.0.0.1', 'localhost', '::1'}):
+    if not permitted_local_request(request):
         if not (os.getenv('GAME_TESTING') == 'true'
                 and client_host == 'testclient' and host == 'testserver'):
             raise HTTPException(403, 'Local credential operations require localhost access')
@@ -809,6 +817,71 @@ def _discover_with_connection(configured: dict) -> list[connectors.DiscoveredAge
             return connectors.discover(configured, google_credentials=values)
     return connectors.discover(configured)
 
+
+
+def _discover_verified_google_with_connection(configured: dict):
+    """Run authenticated Google discovery and return its source receipt.
+
+    Preserve the existing encrypted-credential handling.
+    """
+    if configured["provider"] != "google_agent_engine":
+        raise connectors.DiscoveryError(
+            "Verified discovery is not enabled for this provider"
+        )
+
+    if configured.get("auth_mode") != "legacy":
+        return connectors.discover_google_with_provenance(configured)
+
+    if os.getenv("GAME_AUTH_MODE", "local") == "oidc":
+        raise connectors.DiscoveryError(
+            "Legacy credential mode is disabled for multi-tenant API hosting"
+        )
+
+    with connection() as db:
+        stored = _saved_row(
+            db, configured["id"], configured["tenant_id"]
+        )
+
+    if stored:
+        if (
+            stored["expires_at"]
+            and datetime.fromisoformat(
+                stored["expires_at"].replace("Z", "+00:00")
+            ) <= utc_now()
+        ):
+            raise connectors.DiscoveryError(
+                "Saved temporary credentials have expired; "
+                "update the connection credentials"
+            )
+
+        try:
+            credentials = vault.decrypt(
+                configured["id"],
+                configured["provider"],
+                stored["encrypted_json"],
+            )
+        except vault.VaultError as exc:
+            raise connectors.DiscoveryError(str(exc)) from None
+
+        return connectors.discover_google_with_provenance(
+            configured,
+            google_credentials=credentials,
+        )
+
+    return connectors.discover_google_with_provenance(configured)
+
+
+def _f01_same_discovery_target(before, after):
+    """Reject provider configuration changes during remote discovery."""
+    return (
+        before["provider"] == after["provider"]
+        and before["env_prefix"] == after["env_prefix"]
+        and before["auth_mode"] == after["auth_mode"]
+        and json.loads(before["scope_json"])
+            == json.loads(after["scope_json"])
+        and json.loads(before["auth_config_json"])
+            == json.loads(after["auth_config_json"])
+    )
 
 class AzureSessionCredentials(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True, extra="forbid")
@@ -1025,6 +1098,33 @@ def test_connection(connection_id: str, request: Request):
     return {"connected": True, "visible_agents": len(agents), "notice": "Read-only test. Inventory unchanged."}
 
 
+
+def _connection_history_counts(db, tenant_id, connection_id):
+    """Count evidence that must survive connection changes."""
+    counts = {}
+    for table in (
+        "agents",
+        "discovered_agents",
+        "provider_inventory",
+        "trust_tools",
+    ):
+        counts[table] = db.execute(
+            f"SELECT COUNT(*) FROM {table} "
+            "WHERE tenant_id=? AND connection_id=?",
+            (tenant_id, connection_id),
+        ).fetchone()[0]
+
+    counts["trust_links"] = db.execute("""
+        SELECT COUNT(*)
+        FROM trust_links l
+        JOIN trust_tools t
+          ON t.id=l.tool_id AND t.tenant_id=l.tenant_id
+        WHERE l.tenant_id=? AND t.connection_id=?
+    """, (tenant_id, connection_id)).fetchone()[0]
+
+    return counts
+
+
 @app.patch("/api/connections/{connection_id}")
 def edit_connection(connection_id: str, payload: ConnectionUpdate, request: Request):
     actor = require(request, 'connection_admin')
@@ -1044,16 +1144,17 @@ def edit_connection(connection_id: str, payload: ConnectionUpdate, request: Requ
         credential_changed = (row["env_prefix"] != payload.env_prefix or row['auth_mode'] != auth_mode or
                               json.loads(row['auth_config_json']) != auth_config)
         target_changed = scope_changed or credential_changed
-        count = db.execute("SELECT COUNT(*) FROM discovered_agents WHERE connection_id=? AND tenant_id=?", (connection_id, actor.tenant_id)).fetchone()[0]
-        count += db.execute('SELECT COUNT(*) FROM provider_inventory WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id)).fetchone()[0]
-        if target_changed and count and not payload.clear_inventory_on_scope_change:
-            raise HTTPException(409, detail=f"This identity/scope has {count} previously discovered agent(s). Confirm clearing stale inventory records before changing the connection target.")
+        history = _connection_history_counts(
+            db, actor.tenant_id, connection_id
+        )
+        count = sum(history.values())
         if target_changed and count:
-            db.execute('DELETE FROM trust_links WHERE tenant_id=? AND tool_id IN (SELECT id FROM trust_tools WHERE connection_id=? AND tenant_id=?)',(actor.tenant_id, connection_id, actor.tenant_id))
-            db.execute('DELETE FROM trust_tools WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id))
-            db.execute('DELETE FROM provider_inventory WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id))
-            # Old inventory is no longer valid for the new provider identity or project/region.
-            db.execute("DELETE FROM discovered_agents WHERE connection_id=? AND tenant_id=?", (connection_id, actor.tenant_id))
+            raise HTTPException(
+                409,
+                "Connection contains historical agent inventory "
+                "or Trust Graph evidence. Destructive changes "
+                "require a non-destructive retirement workflow."
+            )
         reset_sync = target_changed
         if reset_sync:
             _clear_saved_credentials(db, connection_id, actor.tenant_id)
@@ -1079,14 +1180,22 @@ def remove_connection(connection_id: str, request: Request, remove_inventory: bo
         row = db.execute("SELECT id FROM provider_connections WHERE id=? AND tenant_id=?", (connection_id, actor.tenant_id)).fetchone()
         if row is None:
             raise HTTPException(404, "Provider connection not found")
-        count = db.execute("SELECT COUNT(*) FROM discovered_agents WHERE connection_id=? AND tenant_id=?", (connection_id, actor.tenant_id)).fetchone()[0]
-        if count and not remove_inventory:
-            raise HTTPException(409, detail=f"Connection has {count} discovered agent(s). Confirm local inventory removal.")
-        db.execute('DELETE FROM trust_links WHERE tenant_id=? AND tool_id IN (SELECT id FROM trust_tools WHERE connection_id=? AND tenant_id=?)',(actor.tenant_id, connection_id, actor.tenant_id))
-        db.execute('DELETE FROM trust_tools WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id))
-        db.execute('DELETE FROM provider_inventory WHERE connection_id=? AND tenant_id=?',(connection_id, actor.tenant_id))
-        db.execute("DELETE FROM discovered_agents WHERE connection_id=? AND tenant_id=?", (connection_id, actor.tenant_id))
-        db.execute("DELETE FROM provider_connections WHERE id=? AND tenant_id=?", (connection_id, actor.tenant_id))
+        history = _connection_history_counts(
+            db, actor.tenant_id, connection_id
+        )
+        count = sum(history.values())
+        if count:
+            raise HTTPException(
+                409,
+                "Connection contains historical agent inventory "
+                "or Trust Graph evidence. Removal is blocked "
+                "until non-destructive retirement is supported."
+            )
+        db.execute(
+            "DELETE FROM provider_connections "
+            "WHERE id=? AND tenant_id=?",
+            (connection_id, actor.tenant_id),
+        )
         _audit(db, actor, 'connection.remove', connection_id)
         return {"removed": True, "removed_inventory_count": count}
 
@@ -1106,12 +1215,68 @@ def sync_connection(connection_id: str, request: Request):
         raise HTTPException(409, 'Private registry uses POST /api/connections/{id}/ingest')
     if configured["credential_source"] in ("encrypted", "vault_unavailable"):
         _require_local_credentials_request(request)
+
+    with connection() as db:
+        initial_credentials = _saved_row(
+            db, connection_id, actor.tenant_id
+        )
+        google_credentials_snapshot = (
+            tuple(initial_credentials)
+            if initial_credentials is not None else None
+        )
+
     # Remote discovery completes BEFORE the DB transaction: partial fetch failures do not
     # cause partial inventory writes. A successful empty response does not remove old records.
+    # F01: Google requires an authenticated connector-issued receipt.
+    # Other providers retain their existing inventory-only behavior.
+    from .identity import (
+        validate_discovery_batch,
+        IdentityConflict,
+        IdentityUnverified,
+    )
+
+    google_verified = configured["provider"] == "google_agent_engine"
+
+    if google_verified:
+        # No DDL inside the inventory transaction.
+        # Startup migration will be enabled only after migration review.
+        with connection() as db:
+            ready = db.execute("""
+                SELECT COUNT(*) FROM sqlite_master
+                WHERE type='table' AND name IN (
+                    'canonical_agents',
+                    'agent_legacy_references',
+                    'agent_identity_mappings'
+                )
+            """).fetchone()[0]
+
+        if ready != 3:
+            raise HTTPException(
+                503,
+                "Canonical identity schema is not initialized. "
+                "Complete the controlled F01 migration first."
+            )
+
     try:
-        agents = _discover_with_connection(configured)
+        receipt = None
+        if google_verified:
+            agents, receipt = (
+                _discover_verified_google_with_connection(configured)
+            )
+        else:
+            agents = _discover_with_connection(configured)
+
+        from .identity import validate_discovery_batch, IdentityConflict
+        try:
+            validate_discovery_batch(agents)
+        except IdentityConflict as exc:
+            raise HTTPException(
+                status_code=409, detail=str(exc)
+            ) from exc
         if len(agents) > 10000:
             raise connectors.DiscoveryError("Over 10,000 agents returned; narrow the scope")
+    except HTTPException:
+        raise
     except connectors.DiscoveryError as exc:
         with connection() as db:
             db.execute("UPDATE provider_connections SET last_error=? WHERE id=? AND tenant_id=?", (str(exc), connection_id, actor.tenant_id))
@@ -1122,6 +1287,96 @@ def sync_connection(connection_id: str, request: Request):
             db.execute("UPDATE provider_connections SET last_error=? WHERE id=? AND tenant_id=?", ("Provider integration failed; inspect server logs", connection_id, actor.tenant_id))
         raise HTTPException(status_code=502, detail="Provider integration failed; check credentials and access") from exc
     synced = iso(utc_now())
+
+    if google_verified:
+        from .identity_persistence import (
+            persist_verified_discovery_batch,
+        )
+
+        try:
+            with connection() as db:
+                # Start the enclosing transaction BEFORE identity
+                # persistence creates or releases any savepoints.
+                #
+                # BEGIN IMMEDIATE obtains the SQLite write reservation
+                # and keeps inventory, canonical identity, sync
+                # metadata, and audit within one transaction.
+                #
+                # The connection() context commits on success
+                # and rolls back the entire transaction on failure.
+                db.execute("BEGIN IMMEDIATE")
+
+                current = db.execute("""
+                    SELECT * FROM provider_connections
+                    WHERE id=? AND tenant_id=?
+                """, (connection_id, actor.tenant_id)).fetchone()
+
+                if (
+                    current is None
+                    or not _f01_same_discovery_target(row, current)
+                ):
+                    raise IdentityConflict(
+                        "Provider connection changed during discovery"
+                    )
+
+                # Reject credential replacement during remote discovery.
+                # Do not log or return encrypted credential material.
+                original_credentials = _saved_row(
+                    db, connection_id, actor.tenant_id
+                )
+
+                # For a legacy connection, the connector may have used
+                # an encrypted credential record. Ensure the same
+                # record was present at the start of discovery.
+                #
+                # The initial snapshot is added in the next replacement.
+                if (
+                    google_credentials_snapshot
+                    != (
+                        tuple(original_credentials)
+                        if original_credentials is not None else None
+                    )
+                ):
+                    raise IdentityConflict(
+                        "Provider credentials changed during discovery"
+                    )
+
+                associated = persist_verified_discovery_batch(
+                    db,
+                    tenant_id=actor.tenant_id,
+                    connection_id=connection_id,
+                    agents=agents,
+                    receipt=receipt,
+                    evidence_reference=(
+                        "google:authenticated-agent-engine-discovery"
+                    ),
+                )
+
+                db.execute("""
+                    UPDATE provider_connections
+                    SET last_synced_at=?, last_error=NULL
+                    WHERE id=? AND tenant_id=?
+                """, (synced, connection_id, actor.tenant_id))
+
+                _audit(
+                    db, actor, "connection.discover", connection_id
+                )
+
+        except (IdentityConflict, IdentityUnverified) as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+        return {
+            "connection_id": connection_id,
+            "discovered": len(agents),
+            "synced_at": synced,
+            "canonical_associated": len(associated),
+            "notice": (
+                "Verified Google Agent Engine inventory and canonical "
+                "identity associations. No runtime or billing imported."
+            ),
+        }
+
+    # Existing inventory-only behavior for all other providers.
     with connection() as db:
         for item in agents:
             db.execute("""INSERT INTO discovered_agents (
@@ -1176,6 +1431,13 @@ def collector_sync_azure_inventory(request: Request):
             raise HTTPException(503, 'Microsoft Foundry discovery failed; verify existing connection credentials and project permissions') from None
         if len(discovered) > 10000:
             raise HTTPException(503, 'Foundry discovery exceeds the supported inventory limit')
+        from .identity import validate_discovery_batch, IdentityConflict
+        try:
+            validate_discovery_batch(discovered)
+        except IdentityConflict as exc:
+            raise HTTPException(
+                status_code=409, detail=str(exc)
+            ) from exc
         snapshots.append((row, discovered))
     now = iso(utc_now())
     with connection() as db:
@@ -1622,7 +1884,9 @@ async def disable_demo_static_cache(request: Request, call_next):
     # Password mode is for localhost development. A hosted version must use enterprise SSO.
     if os.getenv('GAME_AUTH_MODE', 'password').lower() == 'password':
         origin_host=request.client.host if request.client else ''
-        if origin_host not in ('127.0.0.1','::1','testclient'):
+        # Preserve the original in-process FastAPI TestClient allowance.
+        # Real Docker requests must pass the restricted local-network check.
+        if not (origin_host == 'testclient' or permitted_local_request(request)):
             return JSONResponse({'detail':'Password mode permits localhost only'},status_code=403)
     # Prevent an older app.js from breaking tabs after a local upgrade.
     response = await call_next(request)
