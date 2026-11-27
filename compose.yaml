@@ -8,7 +8,8 @@ services:
       GAME_DEMO_DATA: "false"
       GAME_AUTH_MODE: "password"
       GAME_VAULT_KEY_PATH: /app/vault/master.key
+      GAME_LOCAL_DOCKER_GATEWAY: "172.18.0.1"
     volumes:
-      - ./data:/app/data
+      - ${HOME}/.local/share/game:/app/data
       - ${HOME}/.config/game:/app/vault:ro
     restart: unless-stopped

@@ -28,6 +28,7 @@ from .runtime import router as runtime_router
 from .finops import router as finops_router
 from .trust_graph import router as trust_graph_router
 from . import provider_integrations
+from .local_network import permitted_local_request
 
 
 @asynccontextmanager
@@ -699,9 +700,14 @@ def role_catalog(request: Request):
 
 
 def _require_local_credentials_request(request: Request) -> None:
+    if os.getenv("GAME_AUTH_MODE", "password").lower() == "oidc":
+        raise HTTPException(
+            403,
+            "Local credential operations are disabled in OIDC mode",
+        )
     client_host = request.client.host if request.client else ''
     host = request.url.hostname or ''
-    if not (client_host in {'127.0.0.1', '::1'} and host in {'127.0.0.1', 'localhost', '::1'}):
+    if not permitted_local_request(request):
         if not (os.getenv('GAME_TESTING') == 'true'
                 and client_host == 'testclient' and host == 'testserver'):
             raise HTTPException(403, 'Local credential operations require localhost access')
@@ -1871,7 +1877,9 @@ async def disable_demo_static_cache(request: Request, call_next):
     # Password mode is for localhost development. A hosted version must use enterprise SSO.
     if os.getenv('GAME_AUTH_MODE', 'password').lower() == 'password':
         origin_host=request.client.host if request.client else ''
-        if origin_host not in ('127.0.0.1','::1','testclient'):
+        # Preserve the original in-process FastAPI TestClient allowance.
+        # Real Docker requests must pass the restricted local-network check.
+        if not (origin_host == 'testclient' or permitted_local_request(request)):
             return JSONResponse({'detail':'Password mode permits localhost only'},status_code=403)
     # Prevent an older app.js from breaking tabs after a local upgrade.
     response = await call_next(request)
