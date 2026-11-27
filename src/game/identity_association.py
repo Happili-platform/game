@@ -12,9 +12,9 @@ from .identity import (
     bind_discovered_legacy_identity,
     validate_discovery_batch,
 )
-from .identity_preflight import (
-    IdentityPreflight,
-    discovery_identity_preflight,
+from .discovery_provenance import (
+    DiscoveryReceipt,
+    verify_discovery_receipt,
 )
 
 
@@ -24,7 +24,7 @@ def associate_discovered_batch(
     tenant_id: str,
     connection_id: str,
     agents: list,
-    preflight: IdentityPreflight,
+    receipt: DiscoveryReceipt | None,
     evidence_reference: str,
 ) -> dict[str, str]:
     """Associate an already-persisted discovery batch atomically.
@@ -35,15 +35,7 @@ def associate_discovered_batch(
     This function does not create inventory rows, commit the
     caller's transaction, or change legacy agent identifiers.
     """
-    if not preflight.eligible or not preflight.scope_key:
-        raise IdentityUnverified(
-            "Authenticated provider identity is not verified"
-        )
-
     validate_discovery_batch(agents)
-
-    if preflight.agent_count != len(agents):
-        raise IdentityConflict("Discovery batch differs from preflight")
 
     row = db.execute("""
         SELECT provider, scope_json, auth_mode, auth_config_json
@@ -55,28 +47,17 @@ def associate_discovered_batch(
         raise IdentityConflict("Provider connection not found")
 
     configured = {
+        "id": connection_id,
+        "tenant_id": tenant_id,
         "provider": row["provider"],
         "scope": json.loads(row["scope_json"]),
         "auth_mode": row["auth_mode"],
         "auth_config": json.loads(row["auth_config_json"]),
     }
 
-    # Revalidate the resource names and source scope against the
-    # connection currently persisted in the database.
-    checked = discovery_identity_preflight(
-        configured,
-        agents,
-        authenticated_source_verified=True,
-    )
-
-    if (
-        not checked.eligible
-        or checked.provider != preflight.provider
-        or checked.scope_key != preflight.scope_key
-    ):
-        raise IdentityConflict(
-            "Provider identity differs from verified preflight"
-        )
+    # The receipt must identify the same tenant, connection,
+    # provider, scope, and exact resource batch.
+    verify_discovery_receipt(configured, agents, receipt)
 
     if not isinstance(evidence_reference, str) or not evidence_reference.strip():
         raise IdentityUnverified("Source evidence reference is required")

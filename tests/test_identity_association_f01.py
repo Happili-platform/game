@@ -13,7 +13,7 @@ from game.identity import (
     initialize_identity_schema,
 )
 from game.identity_association import associate_discovered_batch
-from game.identity_preflight import discovery_identity_preflight
+from game.discovery_provenance import _issue_connector_receipt
 
 
 SCOPE = {
@@ -83,10 +83,16 @@ def prepared(tmp_path, monkeypatch):
 
 
 def associate(db, agents, cid="conn-a", verified=True):
-    preflight = discovery_identity_preflight(
-        configured(),
-        agents,
-        authenticated_source_verified=verified,
+    receipt = (
+        _issue_connector_receipt(
+            {
+                **configured(),
+                "id": cid,
+                "tenant_id": "local-dev",
+            },
+            agents,
+        )
+        if verified else None
     )
 
     return associate_discovered_batch(
@@ -94,7 +100,7 @@ def associate(db, agents, cid="conn-a", verified=True):
         tenant_id="local-dev",
         connection_id=cid,
         agents=agents,
-        preflight=preflight,
+        receipt=receipt,
         evidence_reference="test:successful-provider-discovery",
     )
 
@@ -169,5 +175,58 @@ def test_missing_inventory_rolls_back_previous_mapping(prepared):
     with connection() as db:
         with pytest.raises(IdentityConflict):
             associate(db, [agent("1"), agent("missing")])
+
+        assert mapping_count(db) == 0
+
+
+def test_association_rejects_receipt_for_different_batch(prepared):
+    from game.discovery_provenance import _issue_connector_receipt
+
+    with connection() as db:
+        receipt = _issue_connector_receipt(
+            {
+                **configured(),
+                "id": "conn-a",
+                "tenant_id": "local-dev",
+            },
+            [agent("1")],
+        )
+
+        # Same agent count, different resource identity.
+        with pytest.raises(IdentityUnverified):
+            associate_discovered_batch(
+                db,
+                tenant_id="local-dev",
+                connection_id="conn-a",
+                agents=[agent("2")],
+                receipt=receipt,
+                evidence_reference="test:provider-discovery",
+            )
+
+        assert mapping_count(db) == 0
+
+
+def test_association_rejects_receipt_from_another_connection(prepared):
+    from game.discovery_provenance import _issue_connector_receipt
+
+    with connection() as db:
+        receipt = _issue_connector_receipt(
+            {
+                **configured(),
+                "id": "conn-a",
+                "tenant_id": "local-dev",
+            },
+            [agent("1")],
+        )
+
+        with pytest.raises(IdentityUnverified):
+            associate_discovered_batch(
+                db,
+                tenant_id="local-dev",
+                connection_id="conn-b",
+                agents=[agent("1")],
+                receipt=receipt,
+                evidence_reference="test:provider-discovery",
+            )
 
         assert mapping_count(db) == 0
